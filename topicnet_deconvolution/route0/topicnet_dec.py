@@ -47,7 +47,7 @@ class GBN_model(nn.Module):
             self.decoder[t + 1].mu = self.decoder[t].mu_c
             self.decoder[t + 1].log_sigma = self.decoder[t].log_sigma_c
 
-        graph_wordnet = sio.loadmat('./dataset/TopicTree_20ng.mat')
+        graph_wordnet = sio.loadmat('/workspace/mnt/cluster/HDD/azuma/TopicModel_Deconv/github/TopicNet/dataset/TopicTree_20ng.mat')
         self.graph = []
         for i in range(len(graph_wordnet['graph_topic_adj'][0])):
             self.graph.append(torch.from_numpy(graph_wordnet['graph_topic_adj'][0][i]).cuda())
@@ -157,7 +157,7 @@ class GBN_model(nn.Module):
                 likelihood[t] = self.compute_loss(x.permute(1, 0), phi_theta[t])
                 loss[t] = likelihood[t] + graph_kl_loss[t]
 
-            elif t == self.layer_num:
+            elif t == self.layer_num:  # Calculation of KL divergence based on gamma and Weibull distributions.
                 loss[t] = self.KL_GamWei(torch.tensor(1.0, dtype=torch.float32).cuda(), torch.tensor(1.0, dtype=torch.float32).cuda(),
                                              k_rec[t - 1].permute(1, 0), l[t - 1].permute(1, 0))
                 likelihood[t] = loss[t]
