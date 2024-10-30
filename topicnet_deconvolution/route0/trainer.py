@@ -1,15 +1,20 @@
+import pickle
+import numpy as np
+import matplotlib.pyplot as plt
+
+from tqdm import tqdm
+
+import torch
 import torch.nn as nn
 from torch.nn.parameter import Parameter
-import torch
-from topicnet_dec import *
-import matplotlib.pyplot as plt
-import pickle
+
 from sklearn.preprocessing import StandardScaler
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import *
 from sklearn import preprocessing
 from sklearn.cluster import KMeans
-import numpy as np
+
+from topicnet_dec import *
 from utils import *
 
 class GBN_trainer:
@@ -31,9 +36,12 @@ class GBN_trainer:
         self.decoder_optimizer = torch.optim.Adam(self.model.decoder.parameters(),
                                                   lr=self.lr, weight_decay=self.weight_decay)
 
-    def train(self, train_data_loader, test_data_loader):
+    def train(self, train_data_loader, valid_data=None):
+        self.train_loss_history = []
+        self.valid_loss_history = []
 
-        for epoch in range(self.epochs):
+        best_loss = 1e10
+        for epoch in tqdm(range(self.epochs)):
             for t in range(self.layer_num - 1):
                 self.model.decoder[t + 1].mu = self.model.decoder[t].mu_c
                 self.model.decoder[t + 1].log_sigma = self.model.decoder[t].log_sigma_c
@@ -45,6 +53,7 @@ class GBN_trainer:
             graph_kl_loss_t = [0] * (self.layer_num + 1)
             num_data = len(train_data_loader)
 
+            # 1. training phase
             for i, (train_data, train_label) in enumerate(train_data_loader):
 
                 self.model.h_encoder.train()
@@ -115,16 +124,46 @@ class GBN_trainer:
                     nn.utils.clip_grad_norm_(self.model.decoder.parameters(), max_norm=20, norm_type=2)
                     self.decoder_optimizer.step()
                     self.decoder_optimizer.zero_grad()
-
+            """
             if epoch % 1 == 0:
                 for t in range(self.layer_num + 1):
-                    print('epoch {}|{}, layer {}|{}, loss: {}, likelihood: {}, lb: {}, graph_kl_loss: {}'.format(epoch, self.epochs, t,
-                                                                                              self.layer_num,
-                                                                                              loss_t[t]/2,
-                                                                                              likelihood_t[t]/2,
-                                                                                              loss_t[t]/2,
-                                                                                              graph_kl_loss_t[t]/2))
+                    print('epoch {}|{}, layer {}|{}, loss: {}, likelihood: {}, lb: {}, graph_kl_loss: {}'.format(
+                        epoch, self.epochs, t, self.layer_num, loss_t[t]/2, likelihood_t[t]/2, loss_t[t]/2, graph_kl_loss_t[t]/2))
                 self.vis_txt()
+            """
+            self.train_loss_history.append(loss_t)
+        
+            # 2. validation phase
+            valid_data = torch.tensor(valid_data, dtype=torch.float).cuda()
+
+            if epoch % 10 == 0:
+                loss_v = [0] * (self.layer_num + 1)
+                likelihood_v = [0] * (self.layer_num + 1)
+
+                self.model.eval()
+                re_x, theta, loss_list, likelihood, graph_kl_loss = self.model(valid_data)
+                # sum to 1 constraint
+                for t in range(self.layer_num):
+                    theta[t] = theta[t] / torch.sum(theta[t], 0, keepdim=True)  # sum to 1 across all topics
+
+                for t in range(self.layer_num + 1):
+                    if t == 0:
+                        loss_v[t] += loss_list[t].item()
+                    else:
+                        loss_v[t] += loss_list[t].item()
+                    likelihood_v[t] += likelihood[t].item()
+
+                # deconvolution loss
+                #deconv_loss_v = summarize_loss(theta[-1].T, valid_y, args)
+                #loss_v[-1] += 1e5*deconv_loss_v.item()
+                self.valid_loss_history.append(loss_v)
+
+                valid_sum_loss = sum(loss_v)
+                if valid_sum_loss < best_loss:
+                    best_loss = valid_sum_loss
+                    # save model
+                    torch.save(self.model.state_dict(), self.save_path)
+
 
     def get_voc(self, voc_path):
         if type(voc_path) == 'str':
