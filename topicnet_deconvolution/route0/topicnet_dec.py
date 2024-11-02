@@ -42,24 +42,24 @@ class GBN_model(nn.Module):
         scale_encoder.append(Conv1D(self.topic_size[self.layer_num], 1, self.hidden_size))
         self.scale_encoder = nn.ModuleList(scale_encoder)
 
-        decoder = [GaussSoftmaxV3(self.topic_size[i], self.topic_size[i + 1], self.embed_size) for i in
-                   range(self.layer_num)]
+        decoder = [GaussSoftmaxV3(self.topic_size[i], self.topic_size[i + 1], self.embed_size) for i in range(self.layer_num)]
         self.decoder = nn.ModuleList(decoder)
 
         for t in range(self.layer_num - 1):
             self.decoder[t + 1].mu = self.decoder[t].mu_c
             self.decoder[t + 1].log_sigma = self.decoder[t].log_sigma_c
 
-        """
-        graph_wordnet = sio.loadmat('/workspace/mnt/cluster/HDD/azuma/TopicModel_Deconv/github/TopicNet/dataset/TopicTree_20ng.mat')
-        self.graph = []
-        for i in range(len(graph_wordnet['graph_topic_adj'][0])):
-            self.graph.append(torch.from_numpy(graph_wordnet['graph_topic_adj'][0][i]).cuda())
-        """
-        graph_net = pd.read_pickle(self.topic_tree_path)
-        self.graph = []
-        for i,k in enumerate(graph_net):
-            self.graph.append(torch.tensor(graph_net[k]).float().cuda())
+        if self.topic_tree_path.endswith('pkl'):
+            graph_net = pd.read_pickle(self.topic_tree_path)
+            self.graph = []
+            for i,k in enumerate(graph_net):
+                self.graph.append(torch.tensor(graph_net[k]).float().cuda())
+        elif self.topic_tree_path.endswith('mat'):
+            #graph_wordnet = sio.loadmat('/workspace/mnt/cluster/HDD/azuma/TopicModel_Deconv/github/TopicNet/dataset/TopicTree_20ng.mat')
+            graph_wordnet = sio.loadmat(self.topic_tree_path)
+            self.graph = []
+            for i in range(len(graph_wordnet['graph_topic_adj'][0])):
+                self.graph.append(torch.from_numpy(graph_wordnet['graph_topic_adj'][0][i]).cuda())
 
         self.ob = 1.0
 
