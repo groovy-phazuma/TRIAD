@@ -53,7 +53,7 @@ def eval_deconv(dec_name_list = [[0],[1]], val_name_list = [["Monocytes"],["CD4T
         dec_name = dec_name_list[i]
         val_name = val_name_list[i]
         plot_dat = pu.DeconvPlot(deconv_df=deconv_df,val_df=y_df,dec_name=dec_name,val_name=val_name,plot_size=20,dpi=50)
-        res = plot_dat.plot_simple_corr(color=color_list[i],title=f'Topic 0:{dec_name} vs {val_name}',target_samples=None)
+        res = plot_dat.plot_simple_corr(color=color_list[i],title=f'Topic:{dec_name} vs {val_name}',target_samples=None)
         overall_res.append(res)
     
     return overall_res

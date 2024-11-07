@@ -41,7 +41,7 @@ class GBN_trainer:
         self.decoder_optimizer = torch.optim.Adam(self.model.decoder.parameters(),
                                                   lr=self.lr, weight_decay=self.weight_decay)
 
-    def train(self, train_data_loader, valid_data=None):
+    def train(self, train_data_loader, valid_data=None, loss_weights=[1e-4, 1e-3, 1e-2, 1e5], deconv_layer=1):
         self.train_loss_history = []
         self.valid_loss_history = []
 
@@ -73,20 +73,20 @@ class GBN_trainer:
 
                 for t in range(self.layer_num + 1):
                     if t == 0:
-                        (1e-4 * loss_list[t]).backward(retain_graph=True)
-                        loss_t[t] += loss_list[t].item() / num_data
+                        (loss_weights[0] * loss_list[t]).backward(retain_graph=True)
+                        loss_t[t] += loss_weights[0] * loss_list[t].item() / num_data
                         likelihood_t[t] += likelihood[t].item() / num_data
                         graph_kl_loss_t[t] += graph_kl_loss[t].item()/num_data
 
                     elif t < self.layer_num:
-                        (1e-3 * loss_list[t]).backward(retain_graph=True)
-                        loss_t[t] += loss_list[t].item() / num_data
+                        (loss_weights[1] * loss_list[t]).backward(retain_graph=True)
+                        loss_t[t] +=  loss_weights[1] * loss_list[t].item() / num_data
                         likelihood_t[t] += likelihood[t].item() / num_data
                         graph_kl_loss_t[t] += graph_kl_loss[t].item() / num_data
 
-                    else:
-                        (1e-2 * loss_list[t]).backward(retain_graph=True)
-                        loss_t[t] += loss_list[t].item() / num_data
+                    else:  # graph_kl_loss is not taken into account when t == self.layer_num.
+                        (loss_weights[2] * loss_list[t]).backward(retain_graph=True)
+                        loss_t[t] +=  loss_weights[2] * loss_list[t].item() / num_data
                         likelihood_t[t] += likelihood[t].item() / num_data
 
 
@@ -110,25 +110,25 @@ class GBN_trainer:
                     self.theta[t] = self.theta[t] / torch.sum(self.theta[t], 0, keepdim=True)  # sum to 1 across all topics
                 for t in range(self.layer_num + 1):
                     if t == 0:
-                        (1e-3*loss_list[t]).backward(retain_graph=True)
-                        loss_t[t] += loss_list[t].item() / num_data
+                        (loss_weights[0] * loss_list[t]).backward(retain_graph=True)
+                        loss_t[t] +=  loss_weights[0] * loss_list[t].item() / num_data
                         likelihood_t[t] += likelihood[t].item() / num_data
                         graph_kl_loss_t[t] += graph_kl_loss[t].item() / num_data
 
                     elif t < self.layer_num:
-                        (1e-2 * loss_list[t]).backward(retain_graph=True)
-                        loss_t[t] += loss_list[t].item() / num_data
+                        (loss_weights[1] * loss_list[t]).backward(retain_graph=True)
+                        loss_t[t] +=  loss_weights[1] * loss_list[t].item() / num_data
                         likelihood_t[t] += likelihood[t].item() / num_data
                         graph_kl_loss_t[t] += graph_kl_loss[t].item() / num_data
                     else:
-                        (1e-2 * loss_list[t]).backward(retain_graph=True)
-                        loss_t[t] += loss_list[t].item() / num_data
+                        (loss_weights[2] * loss_list[t]).backward(retain_graph=True)
+                        loss_t[t] +=  loss_weights[2] * loss_list[t].item() / num_data
                         likelihood_t[t] += likelihood[t].item() / num_data
                 
                 # deconvolution loss (NOTE: the position is correct?)
                 # print(theta[1].T.shape, train_label.shape)  # >> torch.Size([256, 6]) torch.Size([256, 6])
-                deconv_loss = self.summarize_loss(self.theta[1].T, train_label)
-                deconv_loss = 1e5*deconv_loss / num_data
+                deconv_loss = self.summarize_loss(self.theta[deconv_layer].T, train_label)
+                deconv_loss = loss_weights[3] * deconv_loss / num_data
                 deconv_loss.backward()
                 deconv_running_loss += deconv_loss.item()
 
@@ -167,14 +167,16 @@ class GBN_trainer:
 
                     for t in range(self.layer_num + 1):
                         if t == 0:
-                            loss_v[t] += loss_list[t].item()
+                            loss_v[t] += loss_weights[0] *loss_list[t].item()
+                        elif t < self.layer_num:
+                            loss_v[t] += loss_weights[1] *loss_list[t].item()
                         else:
-                            loss_v[t] += loss_list[t].item()
+                            loss_v[t] += loss_weights[2] *loss_list[t].item()
                         likelihood_v[t] += likelihood[t].item()
 
                     # deconvolution loss
-                    deconv_loss_v = self.summarize_loss(theta[1].T, valid_y)
-                    loss_v[-1] += 1e5*deconv_loss_v.item()
+                    deconv_loss_v = self.summarize_loss(theta[deconv_layer].T, valid_y)
+                    loss_v[-1] += loss_weights[3] * deconv_loss_v.item()
                     self.valid_loss_history.append(loss_v)
 
                     valid_sum_loss = sum(loss_v)
@@ -226,12 +228,12 @@ class GBN_trainer:
             top_n_words += ' '
         return top_n_words
 
-    def vis_txt(self):
+    def vis_txt(self, outpath='phi_output'):
         phi = []
         for t in range(self.layer_num):
             phi.append(self.model.decoder[t].w.cpu().detach().numpy())
 
-        self.vision_phi(phi)
+        self.vision_phi(phi, outpath)
     
     def summarize_loss(self, theta_tensor, prop_data):
         # deconvolution loss
