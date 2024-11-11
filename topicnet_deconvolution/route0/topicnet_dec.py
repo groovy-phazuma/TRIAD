@@ -49,7 +49,9 @@ class GBN_model(nn.Module):
             self.decoder[t + 1].mu = self.decoder[t].mu_c
             self.decoder[t + 1].log_sigma = self.decoder[t].log_sigma_c
 
-        if self.topic_tree_path.endswith('pkl'):
+        if args.graph is not None:
+            self.graph = args.graph
+        elif self.topic_tree_path.endswith('pkl'):
             graph_net = pd.read_pickle(self.topic_tree_path)
             self.graph = []
             for i,k in enumerate(graph_net):
