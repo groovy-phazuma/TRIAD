@@ -38,12 +38,16 @@ class GBN_trainer:
                                            {'params': self.model.scale_encoder.parameters()}],
                                           lr=self.lr, weight_decay=self.weight_decay)
 
-        self.decoder_optimizer = torch.optim.Adam(self.model.decoder.parameters(),
-                                                  lr=self.lr, weight_decay=self.weight_decay)
+        #self.decoder_optimizer = torch.optim.Adam(self.model.decoder.parameters(),lr=self.lr, weight_decay=self.weight_decay)
+        self.decoder_optimizer = torch.optim.Adam([{'params': self.model.decoder.parameters()},
+                                                   {'params': self.model.margin}],
+                                                   lr=self.lr, weight_decay=self.weight_decay)
+
 
     def train(self, train_data_loader, valid_data=None, enc_loss_weights=[1e-4, 1e-3, 1e-2], dec_loss_weights=[1e-4, 1e-3, 1e-2, 1e5], deconv_layer=1):
         self.train_loss_history = []
         self.valid_loss_history = []
+        self.graph_kl_loss_history = []
 
         best_loss = 1e10
         for epoch in tqdm(range(self.epochs)):
@@ -148,6 +152,7 @@ class GBN_trainer:
             """
             loss_t[-1] += deconv_running_loss
             self.train_loss_history.append(loss_t)
+            self.graph_kl_loss_history.append(graph_kl_loss_t)
         
             # 2. validation phase
             if valid_data is not None:
