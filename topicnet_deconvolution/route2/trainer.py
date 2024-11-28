@@ -62,7 +62,7 @@ class GBN_trainer:
                 self.model.decoder[t + 1].mu = self.model.decoder[t].mu_c
                 self.model.decoder[t + 1].log_sigma = self.model.decoder[t].log_sigma_c
 
-            self.model.cuda()
+            self.model.to(self.args.device)
 
             #loss_t = [0] * (self.layer_num + 2)
             enc_loss_t = [0] * (self.layer_num + 2)
@@ -87,7 +87,7 @@ class GBN_trainer:
                 self.model.scale_encoder.train()
                 self.model.decoder.eval()
 
-                train_data = torch.tensor(train_data, dtype=torch.float).cuda()
+                train_data = torch.tensor(train_data, dtype=torch.float).to(self.args.device)
 
                 re_x, theta, loss_list, likelihood, graph_kl_loss = self.model(train_data)
 
@@ -178,8 +178,8 @@ class GBN_trainer:
             # 2. validation phase
             if valid_data is not None:
                 # valid_data: (valid_x, valid_y)
-                valid_x = torch.tensor(valid_data[0], dtype=torch.float).cuda()
-                valid_y = torch.tensor(valid_data[1], dtype=torch.float).cuda()
+                valid_x = torch.tensor(valid_data[0], dtype=torch.float).to(self.args.device)
+                valid_y = torch.tensor(valid_data[1], dtype=torch.float).to(self.args.device)
 
                 if epoch == 0 or (epoch + 1) % 10 == 0:
                     loss_v = [0] * (self.layer_num + 2)
@@ -273,9 +273,9 @@ class GBN_trainer:
         # deconvolution loss
         # if prop_data is not tensor, convert it to tensor
         if type(prop_data) == torch.Tensor:
-            prop_tensor = prop_data.cuda()
+            prop_tensor = prop_data.to(self.args.device)
         else:
-            prop_tensor = torch.tensor(prop_data.values).cuda()
+            prop_tensor = torch.tensor(prop_data.values).to(self.args.device)
 
         assert theta_tensor.shape[0] == prop_tensor.shape[0], "Batch size is different"
         deconv_loss_dic = common_utils.calc_deconv_loss(theta_tensor, prop_tensor)
