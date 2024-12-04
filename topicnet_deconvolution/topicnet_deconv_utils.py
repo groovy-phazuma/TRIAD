@@ -15,6 +15,7 @@ import pandas as pd
 import seaborn as sns
 import matplotlib.pyplot as plt
 
+from tqdm import tqdm
 from sklearn.feature_extraction.text import TfidfTransformer
 
 import torch
@@ -29,10 +30,10 @@ from _utils import common_utils
 
 # %%
 class DataPrepSCADEN():
-    def __init__(self, adata, raw_genes=None, sampling_size=1024):
+    def __init__(self, adata, raw_genes=None, sampling_size=1024, target_cells=['Monocytes', 'Unknown', 'Bcells', 'CD4Tcells', 'CD8Tcells', 'NK']):
         self.adata = adata
         self.raw_genes = [t.upper() for t in list(adata.var_names)]
-        self.target_cells = ['Monocytes', 'Unknown', 'Bcells', 'CD4Tcells', 'CD8Tcells', 'NK']
+        self.target_cells = target_cells
         self.sampling_size = sampling_size
     
     def load_data(self):
@@ -65,29 +66,58 @@ class DataPrepSCADEN():
         self.raw_data_gse65133 = np.log1p(data_gse65133)
     
     def set_genes(self, target_genes):
-        self.target_genes = target_genes
-        self.target_gene_idx = [self.raw_genes.index(gene) for gene in target_genes if gene in self.raw_genes]
+        target_genes = [t.upper() for t in target_genes]
+        common_genes = sorted(set(self.raw_genes) & set(target_genes))
+        print(f'Raw genes: {len(self.raw_genes)}')
+        print(f'Input genes: {len(target_genes)}')
+        print(f'Common genes: {len(common_genes)}')
+        self.target_gene_idx = [self.raw_genes.index(gene) for gene in common_genes]
+        self.target_genes = common_genes
     
-    def processing(self, bath_norm=True):
+    def processing(self, bath_norm=True, ds_list=['data6k', 'data8k', 'donorA', 'donorC', 'sdy67', 'GSE65133']):
         if bath_norm:
-            concatenated = np.concatenate((self.raw_data_6k, self.raw_data_8k, self.raw_data_a, self.raw_data_c, self.raw_data_sdy67, self.raw_data_gse65133), axis=0)[:,self.target_gene_idx]  # gene selection
-            concat_labels = [0]*len(self.raw_data_6k) + [1]*len(self.raw_data_8k) + [2]*len(self.raw_data_a) + [3]*len(self.raw_data_c) + [4]*len(self.raw_data_sdy67) + [5]*len(self.raw_data_gse65133)
+            # concatenate
+            concat_pool = []
+            for ds in ds_list:
+                if ds == 'data6k':
+                    concat_pool.append(self.raw_data_6k)
+                elif ds == 'data8k':
+                    concat_pool.append(self.raw_data_8k)
+                elif ds == 'donorA':
+                    concat_pool.append(self.raw_data_a)
+                elif ds == 'donorC':
+                    concat_pool.append(self.raw_data_c)
+                elif ds == 'sdy67':
+                    concat_pool.append(self.raw_data_sdy67)
+                elif ds == 'GSE65133':
+                    concat_pool.append(self.raw_data_gse65133)
+                else:
+                    raise ValueError('Invalid dataset name')
+            concatenated = np.concatenate(concat_pool, axis=0)[:,self.target_gene_idx]  # gene selection
+
+            concat_labels = []
+            for i, e in enumerate(concat_pool):
+                concat_labels += [i]*len(e)
+
+            #concatenated = np.concatenate((self.raw_data_6k, self.raw_data_8k, self.raw_data_a, self.raw_data_c, self.raw_data_sdy67, self.raw_data_gse65133), axis=0)[:,self.target_gene_idx]  # gene selection
+            #concat_labels = [0]*len(self.raw_data_6k) + [1]*len(self.raw_data_8k) + [2]*len(self.raw_data_a) + [3]*len(self.raw_data_c) + [4]*len(self.raw_data_sdy67) + [5]*len(self.raw_data_gse65133)
             # combat
             batch_df = gldadec_processing.batch_norm(df=pd.DataFrame(concatenated).T, lst_batch=concat_labels)
             batch_df = np.expm1(batch_df)  # back to original (linear) scale
             batch_df.index = self.target_genes
 
             # scaling between 0 and 100
-            batch_df = batch_df / batch_df.max().max() * 100
+            self.batch_df = batch_df / batch_df.max().max() * 100
 
             # sample selection
+            # FIXME: Depending on the order in the ds_list, it may break down.
             sampling_size = self.sampling_size
-            data_6k = batch_df.iloc[:,0:sampling_size].T.values.astype(np.float32)
-            data_8k = batch_df.iloc[:,sampling_size:sampling_size*2].T.values.astype(np.float32)
-            data_a = batch_df.iloc[:,sampling_size*2:sampling_size*3].T.values.astype(np.float32)
-            data_c = batch_df.iloc[:,sampling_size*3:sampling_size*4].T.values.astype(np.float32)
-            data_sdy67 = batch_df.iloc[:,sampling_size*4:sampling_size*4+12].T.values.astype(np.float32)
-            data_gse65133 = batch_df.iloc[:,sampling_size*4+12:].T.values.astype(np.float32)
+            data_6k = self.batch_df.iloc[:,0:sampling_size].T.values.astype(np.float32)
+            data_8k = self.batch_df.iloc[:,sampling_size:sampling_size*2].T.values.astype(np.float32)
+            data_a = self.batch_df.iloc[:,sampling_size*2:sampling_size*3].T.values.astype(np.float32)
+            data_c = self.batch_df.iloc[:,sampling_size*3:sampling_size*4].T.values.astype(np.float32)
+            data_sdy67 = self.batch_df.iloc[:,sampling_size*4:sampling_size*4+12].T.values.astype(np.float32)
+            data_gse65133 = self.batch_df.iloc[:,sampling_size*4+12:].T.values.astype(np.float32)
         else:
             data_6k = np.expm1(self.data_6k[:,self.target_gene_idx]).astype(np.float32)
             data_8k = np.expm1(self.data_8k[:,self.target_gene_idx]).astype(np.float32)
@@ -121,6 +151,7 @@ class CustomDataset(Dataset):
 
 class LossSummary():
     def __init__(self, trainer):
+        self.trainer = trainer
         self.train_loss_history = trainer.train_loss_history
         self.valid_loss_history = trainer.valid_loss_history
         self.train_graph_loss_history = trainer.train_graph_kl_loss_history
@@ -187,11 +218,14 @@ class LossSummary():
         plt.tight_layout()
         plt.show()
     
-    def viz_graph_prior(self, graph, do_z=True):
+    def viz_graph_prior(self, model, graph, do_z=True):
         Phi = []
         for t in range(self.trainer.layer_num):
             Phi.append(model.decoder[t].w.cpu().detach().numpy())
             print(model.decoder[t].w.cpu().detach().numpy().shape)
+        
+        sns.clustermap(z_score_transform(torch.tensor(Phi[0])).cpu().detach().numpy())
+        plt.show()
         
         for i in range(len(Phi)):
             fig, axes = plt.subplots(1, 2, figsize=(12, 5))
@@ -217,28 +251,35 @@ class EvalModel():
 
     def eval_corr(self, data_x, data_y, deconv_layer=1,
                      dec_name_list=[[0],[1],[2],[3],[4],[5]], 
-                     val_name_list=[["Monocytes"],["Unknown"],["Bcells"],["CD4Tcells"],["CD8Tcells"],["NK"]]):
-        model = self.model
-        model.eval()
-        phi_theta, theta, loss, likelihood, graph_kl_loss = model(torch.tensor(data_x).to(self.args.device))
+                     val_name_list=[["Monocytes"],["Unknown"],["Bcells"],["CD4Tcells"],["CD8Tcells"],["NK"]],
+                     run_n=1):
+        
+        deconv_df_summary = []
+        for _ in tqdm(range(run_n)):
+            model = self.model
+            model.eval()
+            phi_theta, theta, loss, likelihood, graph_kl_loss = model(torch.tensor(data_x).to(self.args.device))
 
-        topic_size = [self.args.vocab_size] + self.args.topic_size
-        layer_num = len(topic_size) - 1
+            topic_size = [self.args.vocab_size] + self.args.topic_size
+            layer_num = len(topic_size) - 1
 
-        # sum to 1 across all topics
-        for t in range(layer_num):
-            theta[t] = theta[t] / torch.sum(theta[t], 0, keepdim=True)  
+            # sum to 1 across all topics
+            for t in range(layer_num):
+                theta[t] = theta[t] / torch.sum(theta[t], 0, keepdim=True)  
 
-        # layer used for calculating deconvolution loss
-        deconv_df = pd.DataFrame(theta[deconv_layer].detach().cpu().numpy()).T
+            # layer used for calculating deconvolution loss
+            tmp_output = pd.DataFrame(theta[deconv_layer].detach().cpu().numpy()).T
+            deconv_df_summary.append(tmp_output)
+        deconv_df_mean = pd.concat(deconv_df_summary).groupby(level=0).mean()
+
         y_df = data_y.reset_index(drop=True)
 
-        summary_df = pd.concat([deconv_df, y_df],axis=1)
+        summary_df = pd.concat([deconv_df_mean, y_df],axis=1)
         self.corr_df = summary_df.corr()  
         #sns.clustermap(self.corr_df)  # visualize correlation matrix
         #plt.show()
 
-        self.res = common_utils.eval_deconv(dec_name_list = dec_name_list, val_name_list = val_name_list, deconv_df=deconv_df, y_df=y_df)
+        self.res = common_utils.eval_deconv(dec_name_list = dec_name_list, val_name_list = val_name_list, deconv_df=deconv_df_mean, y_df=y_df)
 
         # summarize
         r_list = []
@@ -254,7 +295,6 @@ class EvalModel():
         self.summary_df = summary_df
 
         return
-
 
 
 # %%
@@ -296,7 +336,45 @@ def tf_idf_selection(ref_df, raw_genes, threshold=0.001, fold_change=1.5):
 
     return target_genes, target_results
 
-def get_topic_tree_prior(ref_df, target_genes, topic_tree_path='./path/to/xxx.pkl'):
+
+
+def adjust_column_to_minimum(df_binary, original_df):
+    """
+    Adjusts the number of ones in all columns to match the column with the minimum number of ones.
+    Returns a new DataFrame.
+
+    Parameters:
+        df_binary (pd.DataFrame): Input binary DataFrame
+        original_df (pd.DataFrame): Original DataFrame containing the values
+        
+    Returns:
+        pd.DataFrame: A new binary DataFrame after adjustment
+    """
+    adjusted_df = copy.deepcopy(df_binary)
+
+    column_ones = df_binary.sum(axis=0)
+    min_ones = column_ones.min()
+    
+    for col in adjusted_df.columns:
+        current_ones = column_ones[col]
+        if current_ones > min_ones:
+            # remove extra 1s (remove in order of smallest original values)
+            indices_with_1 = adjusted_df[adjusted_df[col] == 1].index
+            sorted_indices = original_df.loc[indices_with_1, col].sort_values().index
+            indices_to_remove = sorted_indices[:current_ones - min_ones]
+            adjusted_df.loc[indices_to_remove, col] = 0
+    
+    return adjusted_df
+
+
+def get_topic_tree_prior_1(ref_df, target_genes, topic_tree_path='./path/to/xxx.pkl', sparse=True):
+    """
+    Generates topic-tree prior data for a given reference DataFrame and target genes.
+
+    This function processes the reference data to assign genes to topics based on their expression values 
+    and structures the data for use in topic models. It supports both sparse and dense assignment 
+    strategies and builds a graph representation of the topics.
+    """
     ref_df.columns = [t.upper() for t in ref_df.columns.tolist()]
     ref_df = ref_df[target_genes]
 
@@ -305,7 +383,39 @@ def get_topic_tree_prior(ref_df, target_genes, topic_tree_path='./path/to/xxx.pk
     graph_net = pd.read_pickle(topic_tree_path)
     for i,k in enumerate(graph_net):
         if i == 0:
-            tmp = ref_df.T.values
+            # assign 1 to the column with the largest value in each row and 0 otherwise
+            tmp_df = ref_df.T
+            df_binary = (tmp_df.eq(tmp_df.max(axis=1), axis=0)).astype(int)
+            if sparse:
+                adjusted_df = adjust_column_to_minimum(df_binary, tmp_df)
+                tmp = adjusted_df.values
+            # Scenario in which target genes are always assigned to one of the topics.
+            else:  
+                tmp = df_binary.values
+        else:
+            tmp = graph_net[k]
+        tmp = torch.tensor(tmp).float().cuda()
+        print(tmp.shape)
+        topic_list.append(tmp.shape[1])
+        graph.append(tmp)
+    
+    return topic_list, graph
+
+def get_topic_tree_prior_0(ref_df, target_genes, topic_tree_path='./path/to/xxx.pkl'):
+    """
+    Legacy
+    """
+    ref_df.columns = [t.upper() for t in ref_df.columns.tolist()]
+    ref_df = ref_df[target_genes]
+
+    topic_list = []
+    graph = []
+    graph_net = pd.read_pickle(topic_tree_path)
+    for i,k in enumerate(graph_net):
+        if i == 0:
+            # assign 1 to the column with the largest value in each row and 0 otherwise
+            tmp_df = ref_df.T
+            tmp = tmp_df.values
         else:
             tmp = graph_net[k]
         tmp = torch.tensor(tmp).float().cuda()
