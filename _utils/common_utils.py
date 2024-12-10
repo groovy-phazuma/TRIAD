@@ -34,6 +34,10 @@ from _utils import plot_utils as pu
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
 # %%
+def kl_annealing_schedule(epoch, total_epochs, max_beta=1.0):
+    """linear KL annealing scheduler""" 
+    return min(max_beta, epoch / total_epochs * max_beta)
+
 def set_requires_grad(model, requires_grad=True):
     for param in model.parameters():
         param.requires_grad = requires_grad

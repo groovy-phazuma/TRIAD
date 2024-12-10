@@ -41,7 +41,7 @@ class GBN_model(nn.Module):
         self.topic_tree_path = args.topic_tree_path
 
         self.bn_layer = nn.ModuleList([nn.BatchNorm1d(self.hidden_size) for i in range(self.layer_num)])
-        self.margin = nn.Parameter(torch.tensor(5.0))  # default 10.0  # FIXME
+        self.margin = nn.Parameter(torch.tensor(args.margin))  # default 10.0  # FIXME
 
         h_encoder = [Conv1D(self.hidden_size, 1, self.vocab_size)]
         for i in range(self.layer_num - 1):
