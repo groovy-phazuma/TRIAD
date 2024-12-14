@@ -10,6 +10,7 @@ Utils for TopicNet deconvolution.
 BASE_DIR = '/workspace/mnt/cluster/HDD/azuma/TopicModel_Deconv'
 
 import copy
+import random
 import numpy as np
 import pandas as pd
 import seaborn as sns
@@ -27,6 +28,12 @@ from _utils import gldadec_processing
 
 sys.path.append(BASE_DIR+'/github/GSTMDec')
 from _utils import common_utils
+
+def set_seed(seed):
+    torch.manual_seed(seed)
+    np.random.seed(seed)
+    random.seed(seed)
+    torch.cuda.manual_seed_all(seed)
 
 # %%
 class DataPrepSCADEN():
@@ -247,7 +254,10 @@ class EvalModel():
         self.model = model
         self.checkpoint_path = checkpoint_path
 
-        self.model.load_state_dict(torch.load(self.checkpoint_path))
+    def load_model(self):
+        if not hasattr(self, 'model_loaded'):
+            self.model.load_state_dict(torch.load(self.checkpoint_path))
+            self.model_loaded = True 
 
     def eval_corr(self, data_x, data_y, deconv_layer=1,
                      dec_name_list=[[0],[1],[2],[3],[4],[5]], 
@@ -255,10 +265,11 @@ class EvalModel():
                      run_n=1):
         
         deconv_df_summary = []
-        for _ in tqdm(range(run_n)):
-            model = self.model
-            model.eval()
-            phi_theta, theta, loss, likelihood, graph_kl_loss = model(torch.tensor(data_x).to(self.args.device))
+        for seed_idx in tqdm(range(run_n)):
+            set_seed(seed_idx) 
+            self.load_model()
+            self.model.eval()
+            phi_theta, theta, loss, likelihood, graph_kl_loss = self.model(torch.tensor(data_x).to(self.args.device))
 
             topic_size = [self.args.vocab_size] + self.args.topic_size
             layer_num = len(topic_size) - 1

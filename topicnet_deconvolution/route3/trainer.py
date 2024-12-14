@@ -44,6 +44,7 @@ class GBN_trainer:
         self.epochs = args.epochs
         self.voc = self.get_voc(voc_path)
         self.layer_num = len(args.topic_size)
+        self.cell_wise = args.cell_wise
 
         self.model = GBN_model(args)
         self.optimizer = torch.optim.Adam([{'params': self.model.h_encoder.parameters()},
@@ -168,7 +169,7 @@ class GBN_trainer:
                 for t in range(self.layer_num):
                     self.theta[t] = self.theta[t] / torch.sum(self.theta[t], 0, keepdim=True)
 
-                deconv_loss = self.summarize_loss(self.theta[deconv_layer].T, train_label)
+                deconv_loss = self.summarize_loss(self.theta[deconv_layer].T, train_label, cell_wise=self.cell_wise)
                 deconv_loss = loss_weights["deconv_w"] * deconv_loss / num_data
                 deconv_loss.backward()
                 deconv_running_loss += deconv_loss.item()
@@ -221,7 +222,7 @@ class GBN_trainer:
                     # deconvolution loss
                     for t in range(self.layer_num):
                         theta[t] = theta[t] / torch.sum(theta[t], 0, keepdim=True)  # sum to 1 constraint
-                    deconv_loss_v = self.summarize_loss(theta[deconv_layer].T, valid_y)
+                    deconv_loss_v = self.summarize_loss(theta[deconv_layer].T, valid_y, cell_wise=self.cell_wise)
                     loss_v[-1] += loss_weights["deconv_w"] * deconv_loss_v.item()
 
                     self.valid_loss_history.append(loss_v)
@@ -286,15 +287,20 @@ class GBN_trainer:
 
         self.vision_phi(phi, outpath)
     
-    def summarize_loss(self, theta_tensor, prop_data):
+    def summarize_loss(self, theta_tensor, prop_data, cell_wise=True):
         # deconvolution loss
         # if prop_data is not tensor, convert it to tensor
         if type(prop_data) == torch.Tensor:
             prop_tensor = prop_data.to(self.args.device)
         else:
             prop_tensor = torch.tensor(prop_data.values).to(self.args.device)
-
         assert theta_tensor.shape[0] == prop_tensor.shape[0], "Batch size is different"
+
+        if cell_wise:  # Batch size dimension for each cell type
+            pass
+        else:  # Cell type dimension for each sample
+            theta_tensor = theta_tensor.T
+            prop_tensor = prop_tensor.T
         deconv_loss_dic = common_utils.calc_deconv_loss(theta_tensor, prop_tensor)
         deconv_loss = self.alpha*deconv_loss_dic['cos_sim'] + (1-self.alpha)*deconv_loss_dic['rmse']
 
