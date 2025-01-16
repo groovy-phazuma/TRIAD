@@ -51,7 +51,8 @@ def eval_deconv(dec_name_list = [[0],[1]], val_name_list = [["Monocytes"],["CD4T
     assert len(dec_name_list) == len(val_name_list)
     tab_colors = mcolors.TABLEAU_COLORS
     color_list = list(tab_colors.keys())
-
+    loop_n = len(dec_name_list) // len(color_list)
+    color_list = color_list * (loop_n+1)
     overall_res = []
     for i in range(len(dec_name_list)):
         dec_name = dec_name_list[i]
