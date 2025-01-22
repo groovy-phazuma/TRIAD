@@ -171,7 +171,7 @@ class DANN(object):
             disc_loss_DA_epoch = disc_loss_DA_epoch/(batch_idx + 1)
             metric_logger['disc_loss_DA'].append(disc_loss_DA_epoch)
         
-            if (epoch+1) % 1 == 0:
+            if (epoch+1) % 10 == 0:
                 print('============= Epoch {:02d}/{:02d} in stage3 ============='.format(epoch + 1, self.num_epochs))
                 print("pred_loss=%f, disc_loss=%f, disc_loss_DA=%f" % (pred_loss_epoch, disc_loss_epoch, disc_loss_DA_epoch))
                 if self.target_type == "simulated":
