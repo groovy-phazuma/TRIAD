@@ -12,6 +12,11 @@ warnings.filterwarnings('ignore')
 
 from model.utils import *
 
+import sys
+BASE_DIR = '/workspace/mnt/cluster/HDD/azuma/TopicModel_Deconv'
+sys.path.append(BASE_DIR+'/github/GSTMDec')
+from _utils import common_utils
+
 class EncoderBlock(nn.Module):
     def __init__(self, in_dim, out_dim, do_rates):
         super(EncoderBlock, self).__init__()
@@ -38,6 +43,10 @@ class DANN(object):
         self.batch_size = option_list['batch_size']
         self.target_type = option_list['target_type']
         self.learning_rate = option_list['learning_rate']
+        self.early_stop = option_list['early_stop']
+        self.pred_loss_type = option_list['pred_loss_type']
+        assert self.pred_loss_type in ['L1', 'custom'], "Invalid prediction loss type."
+        self.pred_loss_weight = 10  # FIXME
         self.celltype_num = None
         self.labels = None
         self.used_features = None
@@ -140,12 +149,17 @@ class DANN(object):
                 domain_pred_source = self.discriminator_da(embedding_source)
                 domain_pred_target = self.discriminator_da(embedding_target)
 
-                # caculate loss 
-                pred_loss = L1_loss(frac_pred, source_y.cuda())       
+                # calculate loss 
+                if self.pred_loss_type == 'L1':
+                    pred_loss = L1_loss(frac_pred, source_y.cuda())
+                elif self.pred_loss_type == 'custom':
+                    pred_loss = self.summarize_loss(frac_pred, source_y)
+                else:
+                    raise ValueError("Invalid prediction loss type.")
                 pred_loss_epoch += pred_loss.data.item()
                 disc_loss = criterion_da(domain_pred_source, source_label[0:domain_pred_source.shape[0],]) + criterion_da(domain_pred_target, target_label[0:domain_pred_target.shape[0],])
                 disc_loss_epoch += disc_loss.data.item()
-                loss = pred_loss + disc_loss
+                loss = self.pred_loss_weight*pred_loss + disc_loss
 
                 # update weights
                 optimizer_da1.zero_grad()
@@ -194,16 +208,12 @@ class DANN(object):
                 else:
                     update_flag += 1
                     # early stopping
-                    if update_flag == 10:
+                    if update_flag == self.early_stop:
                         print("Early stopping at epoch %d" % (epoch+1))
                         break
-
-        """ TODO: remove
-        if self.target_type == "simulated":
-            SaveLossPlot(self.outdir, self.metric_logger, loss_type = ['pred_loss','disc_loss','disc_loss_DA','target_ccc','target_rmse','target_corr'], output_prex = 'Loss_metric_plot_stage3')
-        elif self.target_type == "real":
-            SaveLossPlot(self.outdir, self.etric_logger, loss_type = ['pred_loss','disc_loss','disc_loss_DA'], output_prex = 'Loss_metric_plot_stage3')
-        """
+        
+        # save last model
+        torch.save(self.model_da.state_dict(), os.path.join(self.outdir, 'last_model.pth'))
     
     def load_checkpoint(self, model_path):
         self.model_da = self.DANN_model(self.celltype_num).cuda()
@@ -222,4 +232,18 @@ class DANN(object):
         target_preds = pd.DataFrame(preds, columns=self.labels)
         ground_truth = pd.DataFrame(gt, columns=self.labels)  # random ratio is output if "real"
         return target_preds, ground_truth
+    
+    def summarize_loss(self, theta_tensor, prop_data):
+        # deconvolution loss
+        # if prop_data is not tensor, convert it to tensor
+        if type(prop_data) == torch.Tensor:
+            prop_tensor = prop_data.cuda()
+        else:
+            prop_tensor = torch.tensor(prop_data.values).cuda()
+
+        assert theta_tensor.shape[0] == prop_tensor.shape[0], "Batch size is different"
+        deconv_loss_dic = common_utils.calc_deconv_loss(theta_tensor, prop_tensor)
+        deconv_loss = deconv_loss_dic['cos_sim'] + 1.0*deconv_loss_dic['rmse']
+
+        return deconv_loss
     
