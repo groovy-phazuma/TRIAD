@@ -23,8 +23,9 @@ import torch
 from torch.utils.data import Dataset, DataLoader
 
 import sys
-sys.path.append(BASE_DIR+'/github/GLDADec')
-from _utils import gldadec_processing
+sys.path.append(BASE_DIR+'/github/deconv-utils')
+from src import preprocessing as pp
+from src import evaluation as ev
 
 sys.path.append(BASE_DIR+'/github/GSTMDec')
 from _utils import common_utils
@@ -109,7 +110,7 @@ class DataPrepSCADEN():
             #concatenated = np.concatenate((self.raw_data_6k, self.raw_data_8k, self.raw_data_a, self.raw_data_c, self.raw_data_sdy67, self.raw_data_gse65133), axis=0)[:,self.target_gene_idx]  # gene selection
             #concat_labels = [0]*len(self.raw_data_6k) + [1]*len(self.raw_data_8k) + [2]*len(self.raw_data_a) + [3]*len(self.raw_data_c) + [4]*len(self.raw_data_sdy67) + [5]*len(self.raw_data_gse65133)
             # combat
-            batch_df = gldadec_processing.batch_norm(df=pd.DataFrame(concatenated).T, lst_batch=concat_labels)
+            batch_df = pp.batch_norm(df=pd.DataFrame(concatenated).T, lst_batch=concat_labels)
             batch_df = np.expm1(batch_df)  # back to original (linear) scale
             batch_df.index = self.target_genes
 
@@ -290,17 +291,21 @@ class EvalModel():
         #sns.clustermap(self.corr_df)  # visualize correlation matrix
         #plt.show()
 
-        self.res = common_utils.eval_deconv(dec_name_list = dec_name_list, val_name_list = val_name_list, deconv_df=deconv_df_mean, y_df=y_df)
+        self.res = ev.eval_deconv(dec_name_list=dec_name_list, val_name_list=val_name_list, deconv_df=deconv_df_mean, y_df=y_df)
 
         # summarize
         r_list = []
+        mae_list = []
+        ccc_list = []
         rmse_list = []
         for i in range(len(dec_name_list)):
             tmp_res = self.res[i][0]
-            r, rmse = tmp_res['R'], tmp_res['RMSE']
+            r, mae, ccc, rmse = tmp_res['R'], tmp_res['MAE'], tmp_res['CCC'], tmp_res['RMSE']
             r_list.append(r)
+            mae_list.append(mae)
+            ccc_list.append(ccc)
             rmse_list.append(rmse)
-        summary_df = pd.DataFrame({'R':r_list, 'RMSE':rmse_list})
+        summary_df = pd.DataFrame({'R':r_list, 'CCC':ccc_list, 'MAE':mae_list, 'RMSE':rmse_list})
         summary_df.index = [t[0] for t in val_name_list]
 
         self.summary_df = summary_df

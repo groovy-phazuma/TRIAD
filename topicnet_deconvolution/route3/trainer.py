@@ -183,8 +183,15 @@ class GBN_trainer:
                     self.decoder_optimizer.zero_grad()
 
             dec_loss_t[-1] += deconv_running_loss
+
             self.train_loss_history.append((enc_loss_t, dec_loss_t))
             self.train_graph_kl_loss_history.append((enc_graph_kl_loss_t, dec_graph_kl_loss_t))
+
+            # QC
+            if np.nan in enc_loss_t or np.nan in dec_loss_t:
+                raise valueError("Loss is nan")
+            if np.nan in enc_graph_kl_loss_t or np.nan in dec_graph_kl_loss_t:
+                raise valueError("Graph KL loss is nan")
 
             # sum of all losses
             train_sum_loss = sum(enc_loss_t) + sum(dec_loss_t) \
@@ -227,6 +234,12 @@ class GBN_trainer:
 
                     self.valid_loss_history.append(loss_v)
                     self.valid_graph_kl_loss_history.append(graph_kl_loss_v)
+
+                    # QC
+                    if np.nan in loss_v:
+                        raise valueError("Loss is nan")
+                    if np.nan in graph_kl_loss_v:
+                        raise valueError("Graph KL loss is nan")
 
                     # sum of all losses
                     valid_sum_loss = sum(loss_v) + sum(graph_kl_loss_v)
