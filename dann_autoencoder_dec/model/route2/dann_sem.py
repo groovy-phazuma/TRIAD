@@ -127,14 +127,14 @@ class InferenceNet(nn.Module):
             nonLinear,
             nn.Linear(z_dim, z_dim),
             nonLinear,
-            GumbelSoftmax(z_dim, y_dim)
+            GumbelSoftmax(z_dim, y_dim)  # >> logits, prob, y
         ])
         self.inference_qzyx = torch.nn.ModuleList([
             nn.Linear(x_dim + y_dim, z_dim),
             nonLinear,
             nn.Linear(z_dim, z_dim),
             nonLinear,
-            Gaussian(z_dim, 1)
+            Gaussian(z_dim, 1)  # >> mu, logvar
         ])
 
     def reparameterize(self, mu, var):
@@ -148,7 +148,7 @@ class InferenceNet(nn.Module):
         num_layers = len(self.inference_qyx)
         for i, layer in enumerate(self.inference_qyx):
             if i == num_layers - 1:
-                x = layer(x, temperature)
+                x = layer(x, temperature)  # x: (batch_size, feature_dim, 1)
             else:
                 x = layer(x)
         return x
@@ -205,14 +205,30 @@ class GenerativeNet(nn.Module):
         output = {'y_mean': y_mu.view(-1, self.n_gene), 'y_var': y_var.view(-1, self.n_gene), 'x_rec': x_rec}
         return output
 
+class Predictor(nn.Module):
+    def __init__(self, in_dim, out_dim, do_rates):
+        super(Predictor, self).__init__()
+        self.layer = nn.Sequential(nn.Linear(in_dim, out_dim),
+                                   nn.LeakyReLU(0.2, inplace=True),
+                                   nn.Dropout(p=do_rates, inplace=False))
+    
+    def forward(self, x):
+        out = self.layer(x)
+        return out
+
 class DANN_SEM(nn.Module):
-    def __init__(self, adj_A, x_dim, z_dim, y_dim):
+    def __init__(self, adj_A, x_dim, z_dim, y_dim, celltype_num, pred_loss_type='L1'):
         super(DANN_SEM, self).__init__()
         self.adj_A = nn.Parameter(Variable(torch.from_numpy(adj_A).double(), requires_grad=True, name='adj_A'))
         self.n_gene = n_gene = len(adj_A)
+        self.celltype_num = celltype_num
+        self.pred_loss_type = pred_loss_type
         nonLinear = nn.Tanh()
         self.inference = InferenceNet(x_dim, z_dim, y_dim, n_gene, nonLinear)
         self.generative = GenerativeNet(x_dim, z_dim, y_dim, n_gene, nonLinear)
+        self.predictor = nn.Sequential(Predictor(y_dim, y_dim//2, 0.2), 
+                                          nn.Linear(y_dim//2, celltype_num), 
+                                          nn.Softmax(dim=1))
         self.losses = LossFunctions()
         for m in self.modules():
             if type(m) == nn.Linear or type(m) == nn.Conv2d or type(m) == nn.ConvTranspose2d:
@@ -224,9 +240,10 @@ class DANN_SEM(nn.Module):
         adj_normalized = Tensor(np.eye(adj.shape[0])) - (adj.transpose(0, 1))
         return adj_normalized
 
-    def forward(self, x, dropout_mask, temperature=1.0):
+    def forward(self, x, frac_true, dropout_mask, temperature=1.0):
+        assert frac_true.shape[1] == self.celltype_num
         x_ori = x
-        x = x.view(x.size(0), -1, 1)
+        x = x.view(x.size(0), -1, 1)  # (batch_size, feature_dim, 1)
         mask = Variable(torch.from_numpy(np.ones(self.n_gene) - np.eye(self.n_gene)).float(), requires_grad=False).cuda()
         adj_A_t = self._one_minus_A_t(self.adj_A * mask)
         adj_A_t_inv = torch.inverse(adj_A_t)
@@ -245,9 +262,23 @@ class DANN_SEM(nn.Module):
         loss_rec = self.losses.reconstruction_loss(x_ori, output['x_rec'], dropout_mask, 'mse')
         loss_gauss = self.losses.gaussian_loss(z, output['mean'], output['var'], output['y_mean'], output['y_var'])# * opt.beta
         loss_cat = (-self.losses.entropy(output['logits'], output['prob_cat']) - np.log(0.1))# * opt.beta
-        loss = loss_rec + loss_gauss + loss_cat
 
-        return loss, loss_rec, loss_gauss, loss_cat, dec, y, output['mean']
+        # predictor
+        frac_pred = self.predictor(output['prob_cat'])
+        output['frac_pred'] = frac_pred
+
+        # calculate loss 
+        if self.pred_loss_type == 'L1':
+            loss_pred = L1_loss(frac_pred, frac_true)
+        elif self.pred_loss_type == 'custom':
+            loss_pred = summarize_loss(frac_pred, frac_true)
+        else:
+            raise ValueError("Invalid prediction loss type.")
+
+        # total loss
+        loss_dict = {'loss_rec': loss_rec, 'loss_gauss': loss_gauss, 'loss_cat': loss_cat, 'loss_pred': loss_pred}
+
+        return loss_dict, dec, y, output
 
 # %%
 def initialize_A(topic_nums=16):
@@ -287,3 +318,11 @@ def prepare_dataloader(source_data, target_data, batch_size):
     test_target_loader = Data.DataLoader(dataset=target_dataset, batch_size=batch_size, shuffle=False)
 
     return train_source_loader, train_target_loader, test_target_loader, labels, used_features
+
+def summarize_loss(theta_tensor, prop_tensor):
+    # deconvolution loss
+    assert theta_tensor.shape[0] == prop_tensor.shape[0], "Batch size is different"
+    deconv_loss_dic = common_utils.calc_deconv_loss(theta_tensor, prop_tensor)
+    deconv_loss = deconv_loss_dic['cos_sim'] + 0.0*deconv_loss_dic['rmse']
+
+    return deconv_loss
