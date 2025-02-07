@@ -2,9 +2,6 @@
 """
 Created on 2025-02-04 (Tue) 13:43:07
 
-- Domain Adaptation (DA)
-- Structural Equation Model (SEM)
-
 Reference
 - scpDeconv
 - DeepSEM
@@ -208,7 +205,6 @@ class GenerativeNet(nn.Module):
         output = {'y_mean': y_mu.view(-1, self.n_gene), 'y_var': y_var.view(-1, self.n_gene), 'x_rec': x_rec}
         return output
 
-"""
 class Predictor(nn.Module):
     def __init__(self, in_dim, out_dim, do_rates):
         super(Predictor, self).__init__()
@@ -219,18 +215,6 @@ class Predictor(nn.Module):
     def forward(self, x):
         out = self.layer(x)
         return out
-"""
-
-class MLPBlock(nn.Module):
-    def __init__(self, in_dim, out_dim, do_rates):
-        super(MLPBlock, self).__init__()
-        self.layer = nn.Sequential(nn.Linear(in_dim, out_dim),
-                                   nn.LeakyReLU(0.2, inplace=True),
-                                   nn.Dropout(p=do_rates, inplace=False))
-    def forward(self, x):
-        out = self.layer(x)
-        return out
-
 
 class DANN_SEM(nn.Module):
     def __init__(self, adj_A, x_dim, z_dim, y_dim, celltype_num, pred_loss_type='L1',seed=42):
@@ -250,16 +234,15 @@ class DANN_SEM(nn.Module):
         nonLinear = nn.Tanh()
         self.inference = InferenceNet(x_dim, z_dim, y_dim, n_gene, nonLinear)
         self.generative = GenerativeNet(x_dim, z_dim, y_dim, n_gene, nonLinear)
-        self.predictor = nn.Sequential(  # FIXME: Could be a little simpler.
-            MLPBlock(self.n_gene, self.n_gene//2, 0.2),
-            MLPBlock(self.n_gene//2, self.n_gene//4, 0.2),
+        """legacy
+        self.predictor = nn.Sequential(Predictor(y_dim, y_dim//2, 0.2), 
+                                          nn.Linear(y_dim//2, celltype_num), 
+                                          nn.Softmax(dim=1))
+        """
+        self.predictor = nn.Sequential(
+            Predictor(self.n_gene, self.n_gene//2, 0.2),
+            Predictor(self.n_gene//2, self.n_gene//4, 0.2),
             nn.Linear(self.n_gene//4, celltype_num),
-            nn.Softmax(dim=1)
-        )
-        self.discriminator =  nn.Sequential(  # FIXME: Could be a little simpler.
-            MLPBlock(self.n_gene, self.n_gene//2, 0.2),
-            MLPBlock(self.n_gene//2, self.n_gene//4, 0.2),
-            nn.Linear(self.n_gene//4, 1),
             nn.Softmax(dim=1)
         )
         self.losses = LossFunctions()
@@ -297,7 +280,9 @@ class DANN_SEM(nn.Module):
         loss_cat = (-self.losses.entropy(output['logits'], output['prob_cat']) - np.log(0.1))# * opt.beta
 
         # predictor
-        frac_pred = self.predictor(out_inf['gaussian'])  # NOTE: This is just before passing through the inv GRN layer
+        #frac_pred = self.predictor(output['categorical'])  # prob_cat did not work well
+        frac_pred = self.predictor(out_inf['gaussian'])  # NOTE: This is　just before passing through the inv GRN layer
+        #frac_pred = self.predictor(z_inv)  # NOTE: This is　just before passing through the inv GRN layer
         output['frac_pred'] = frac_pred
 
         # calculate loss 
@@ -337,6 +322,7 @@ def prepare_dataloader(source_data, target_data, batch_size):
     tr_data = torch.FloatTensor(source_data_x)
     tr_labels = torch.FloatTensor(source_data_y)
     source_dataset = Data.TensorDataset(tr_data, tr_labels)
+    #train_source_loader = Data.DataLoader(dataset=source_dataset, batch_size=batch_size, shuffle=True)
     train_source_loader = DataLoader(dataset=source_dataset, batch_size=batch_size, shuffle=True, worker_init_fn=seed_worker, generator=g)
 
     # Extract celltype and feature info
@@ -352,6 +338,7 @@ def prepare_dataloader(source_data, target_data, batch_size):
     te_labels = torch.FloatTensor(target_data_y)
     target_dataset = Data.TensorDataset(te_data, te_labels)
 
+    #train_target_loader = Data.DataLoader(dataset=target_dataset, batch_size=batch_size, shuffle=True)
     train_target_loader = DataLoader(dataset=target_dataset, batch_size=batch_size, shuffle=True, worker_init_fn=seed_worker, generator=g)
     test_target_loader = Data.DataLoader(dataset=target_dataset, batch_size=batch_size, shuffle=False)
 
