@@ -2,8 +2,11 @@
 """
 Created on 2025-02-04 (Tue) 13:43:07
 
+- Input dual domain data (source and target)
 - Domain Adaptation (DA)
 - Structural Equation Model (SEM)
+
+>> Something is wrong with the code. It is not working properly.
 
 Reference
 - scpDeconv
@@ -233,7 +236,7 @@ class MLPBlock(nn.Module):
 
 
 class DANN_SEM(nn.Module):
-    def __init__(self, adj_A, x_dim, z_dim, y_dim, celltype_num, pred_loss_type='L1',seed=42):
+    def __init__(self, x_dim, z_dim, y_dim, n_celltype, n_gene, adj_S=None, adj_T=None, pred_loss_type='L1',seed=42):
         super(DANN_SEM, self).__init__()
         self.seed = seed
         cudnn.deterministic = True
@@ -243,23 +246,22 @@ class DANN_SEM(nn.Module):
         torch.manual_seed(self.seed)
         random.seed(self.seed)
 
-        self.adj_A = nn.Parameter(Variable(torch.from_numpy(adj_A).double(), requires_grad=True, name='adj_A'))
-        self.n_gene = n_gene = len(adj_A)
-        self.celltype_num = celltype_num
+        if adj_S is None:
+            adj_S = initialize_A(topic_nums=n_gene, seed=self.seed)
+        if adj_T is None:
+            adj_T = initialize_A(topic_nums=n_gene, seed=self.seed)
+        self.adj_S = nn.Parameter(Variable(torch.from_numpy(adj_S).double(), requires_grad=True, name='adj_S'))
+        self.adj_T = nn.Parameter(Variable(torch.from_numpy(adj_T).double(), requires_grad=True, name='adj_T'))
+        self.n_gene = n_gene
+        self.n_celltype = n_celltype
         self.pred_loss_type = pred_loss_type
         nonLinear = nn.Tanh()
         self.inference = InferenceNet(x_dim, z_dim, y_dim, n_gene, nonLinear)
         self.generative = GenerativeNet(x_dim, z_dim, y_dim, n_gene, nonLinear)
         self.predictor = nn.Sequential(  # FIXME: Could be a little simpler.
-            MLPBlock(self.n_gene, self.n_gene//2, 0.2),
-            MLPBlock(self.n_gene//2, self.n_gene//4, 0.2),
-            nn.Linear(self.n_gene//4, celltype_num),
-            nn.Softmax(dim=1)
-        )
-        self.discriminator =  nn.Sequential(  # FIXME: Could be a little simpler.
-            MLPBlock(self.n_gene, self.n_gene//2, 0.2),
-            MLPBlock(self.n_gene//2, self.n_gene//4, 0.2),
-            nn.Linear(self.n_gene//4, 1),
+            MLPBlock(n_gene, n_gene//2, 0.2),
+            MLPBlock(n_gene//2, n_gene//4, 0.2),
+            nn.Linear(n_gene//4, n_celltype),
             nn.Softmax(dim=1)
         )
         self.losses = LossFunctions()
@@ -273,7 +275,69 @@ class DANN_SEM(nn.Module):
         adj_normalized = Tensor(np.eye(adj.shape[0])) - (adj.transpose(0, 1))
         return adj_normalized
 
-    def forward(self, x, frac_true, dropout_mask, temperature=1.0):
+    def sem_block(self, x_ori, x, adj_t, dropout_mask, temperature=1.0):
+        # encoder
+        out_inf = self.inference(x, adj_t, temperature)
+        z, y = out_inf['gaussian'], out_inf['categorical']
+        z_inv = torch.matmul(z.float(), adj_t.float())
+
+        # decoder
+        out_gen = self.generative(z_inv, y, adj_t)
+        output = out_inf
+        for key, value in out_gen.items():
+            output[key] = value
+        dec = output['x_rec']
+        loss_rec = self.losses.reconstruction_loss(x_ori, output['x_rec'], dropout_mask, 'mse')
+        loss_gauss = self.losses.gaussian_loss(z, output['mean'], output['var'], output['y_mean'], output['y_var'])# * opt.beta
+        loss_cat = (-self.losses.entropy(output['logits'], output['prob_cat']) - np.log(0.1))# * opt.beta
+
+        return loss_rec, loss_gauss, loss_cat, output, out_inf
+    
+    def forward(self, source_x, target_x, source_y, dropout_mask, temperature=1.0):
+        assert source_y.shape[1] == self.n_celltype
+        mask = Variable(torch.from_numpy(np.ones(self.n_gene) - np.eye(self.n_gene)).float(), requires_grad=False).cuda()
+
+        adj_S_t = self._one_minus_A_t(self.adj_S * mask)
+        adj_S_t_inv = torch.inverse(adj_S_t)
+
+        adj_T_t = self._one_minus_A_t(self.adj_T * mask)
+        adj_T_t_inv = torch.inverse(adj_T_t)
+
+        # 1. source data
+        x_ori = source_x
+        source_x = source_x.view(source_x.size(0), -1, 1)  # (batch_size, feature_dim, 1)
+        loss_rec_s, loss_gauss_s, loss_cat_s, output_s, out_inf_s = self.sem_block(x_ori, source_x, adj_S_t, dropout_mask, temperature)
+
+        # 2. target data
+        x_ori = target_x
+        target_x = target_x.view(target_x.size(0), -1, 1)  # (batch_size, feature_dim, 1)
+        loss_rec_t, loss_gauss_t, loss_cat_t, output_t, out_inf_t = self.sem_block(x_ori, target_x, adj_T_t, dropout_mask, temperature)
+
+        loss_rec = loss_rec_s + loss_rec_t
+        loss_gauss = loss_gauss_s + loss_gauss_t
+        loss_cat = loss_cat_s + loss_cat_t
+
+        # predictor
+        source_pred = self.predictor(out_inf_s['gaussian'])  # NOTE: This is just before passing through the inv GRN layer
+        target_pred = self.predictor(out_inf_t['gaussian'])
+        output_s['source_pred'] = source_pred
+        output_t['target_pred'] = target_pred
+
+        # calculate loss  (source only)
+        if self.pred_loss_type == 'L1':
+            loss_pred = L1_loss(source_pred, source_y)
+        elif self.pred_loss_type == 'custom':
+            loss_pred = summarize_loss(source_pred, source_y)
+        else:
+            raise ValueError("Invalid prediction loss type.")
+
+        # total loss
+        loss_dict = {'loss_rec': loss_rec, 'loss_gauss': loss_gauss, 'loss_cat': loss_cat, 'loss_pred': loss_pred}
+
+        return loss_dict, (output_s, output_t)
+
+
+    def forward_legacy(self, x, frac_true, dropout_mask, temperature=1.0):
         assert frac_true.shape[1] == self.celltype_num
         x_ori = x
         x = x.view(x.size(0), -1, 1)  # (batch_size, feature_dim, 1)
@@ -369,3 +433,5 @@ def seed_worker(worker_id):
     worker_seed = torch.initial_seed() % 2**32
     np.random.seed(worker_seed)
     random.seed(worker_seed)
+
+# %%
