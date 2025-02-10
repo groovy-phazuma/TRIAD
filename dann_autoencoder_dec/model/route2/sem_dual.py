@@ -202,10 +202,11 @@ class GenerativeNet(nn.Module):
             z = layer(z)
         return z
 
-    def forward(self, z, y, adj):
+    def forward(self, z, y, adj_inv):
+        z_inv = torch.matmul(z.float(), adj_inv.float())
         y_mu, y_logvar = self.pzy(y)
-        y_mu = torch.matmul(y_mu.float(), adj.float())
-        y_logvar = torch.matmul(y_logvar.float(), adj.float())
+        y_mu = torch.matmul(y_mu.float(), adj_inv.float())
+        y_logvar = torch.matmul(y_logvar.float(), adj_inv.float())
         y_var = torch.exp(y_logvar)
         x_rec = self.pxz(z.unsqueeze(-1)).squeeze(2)
         output = {'y_mean': y_mu.view(-1, self.n_gene), 'y_var': y_var.view(-1, self.n_gene), 'x_rec': x_rec}
@@ -265,13 +266,13 @@ class DANN_SEM(nn.Module):
         return adj_normalized
 
     def source_block(self, x_ori, x, adj_s, dropout_mask, temperature=1.0):
+        adj_s_inv = torch.inverse(adj_s)
         # encoder
         out_inf = self.inference_s(x, adj_s, temperature)
         z, y = out_inf['gaussian'], out_inf['categorical']
-        z_inv = torch.matmul(z.float(), adj_s.float())
 
         # decoder
-        out_gen = self.generative_s(z_inv, y, adj_s)
+        out_gen = self.generative_s(z, y, adj_s_inv)
         output = out_inf
         for key, value in out_gen.items():
             output[key] = value
@@ -283,13 +284,13 @@ class DANN_SEM(nn.Module):
         return loss_rec, loss_gauss, loss_cat, output, out_inf
     
     def target_block(self, x_ori, x, adj_t, dropout_mask, temperature=1.0):
+        adj_t_inv = torch.inverse(adj_t)
         # encoder
         out_inf = self.inference_t(x, adj_t, temperature)
         z, y = out_inf['gaussian'], out_inf['categorical']
-        z_inv = torch.matmul(z.float(), adj_t.float())
 
         # decoder
-        out_gen = self.generative_t(z_inv, y, adj_t)
+        out_gen = self.generative_t(z, y, adj_t_inv)
         output = out_inf
         for key, value in out_gen.items():
             output[key] = value
