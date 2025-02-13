@@ -217,16 +217,16 @@ class MLPBlock(nn.Module):
     def __init__(self, in_dim, out_dim, do_rates):
         super(MLPBlock, self).__init__()
         self.layer = nn.Sequential(nn.Linear(in_dim, out_dim),
-                                   nn.LeakyReLU(0.2, inplace=True),
+                                   nn.LeakyReLU(0.2, inplace=True), 
                                    nn.Dropout(p=do_rates, inplace=False))
     def forward(self, x):
         out = self.layer(x)
         return out
 
 
-class DANN_SEM(nn.Module):
+class DANN_SEM_AD(nn.Module):
     def __init__(self, x_dim, z_dim, y_dim, n_celltype, n_gene, adj_A=None, pred_loss_type='L1',seed=42):
-        super(DANN_SEM, self).__init__()
+        super(DANN_SEM_AD, self).__init__()
         self.seed = seed
         cudnn.deterministic = True
         cudnn.benchmark = False
@@ -243,7 +243,9 @@ class DANN_SEM(nn.Module):
         self.n_celltype = n_celltype
         self.pred_loss_type = pred_loss_type
         nonLinear = nn.Tanh()
+        self.inference_s = InferenceNet(x_dim, z_dim, y_dim, n_gene, nonLinear)  # FIXME: Not used.
         self.inference_t = InferenceNet(x_dim, z_dim, y_dim, n_gene, nonLinear)
+        self.generative_s = GenerativeNet(x_dim, z_dim, y_dim, n_gene, nonLinear)  # FIXME: Not used.
         self.generative_t = GenerativeNet(x_dim, z_dim, y_dim, n_gene, nonLinear)
         self.predictor = nn.Sequential(  # FIXME: Could be a little simpler.
             MLPBlock(n_gene, n_gene//2, 0.2),
@@ -251,26 +253,22 @@ class DANN_SEM(nn.Module):
             nn.Linear(n_gene//4, n_celltype),
             nn.Softmax(dim=1)
         )
-        """
-        self.discriminator = nn.Sequential(
-            MLPBlock(n_gene, 128, 0.2),
-            nn.Linear(128, 1),
-            nn.Sigmoid()
-        )
-        """
+        
         self.discriminator = nn.Sequential(
             nn.Linear(n_gene, 128),
-            nn.LeakyReLU(0.2, inplace=True),
+            nn.LeakyReLU(0.2, inplace=True), 
             nn.Dropout(p=0.2, inplace=False),
             nn.Linear(128, 1),
             nn.Sigmoid()
         )
         self.losses = LossFunctions()
+
         for m in self.modules():
             if type(m) == nn.Linear or type(m) == nn.Conv2d or type(m) == nn.ConvTranspose2d:
                 torch.nn.init.xavier_normal_(m.weight)
                 if m.bias.data is not None:
                     init.constant_(m.bias, 0)
+        
 
     def _one_minus_A_t(self, adj):
         adj_normalized = Tensor(np.eye(adj.shape[0])) - (adj.transpose(0, 1))
