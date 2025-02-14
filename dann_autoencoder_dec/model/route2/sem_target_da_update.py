@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-Created on 2025-02-04 (Tue) 13:43:07
+Created on 2025-02-14 (Fri) 13:05:11
 
 Build independent branches for source and target.
 The reconstruction considers only the TARGET side.
@@ -14,13 +14,6 @@ Reference
 - DeepSEM
 
 Results
-R	CCC	MAE
-Monocytes	0.5786	0.345333	0.0675
-Unknown	0.4265	0.244689	0.0188
-Bcells	0.6142	0.106491	0.0590
-CD4Tcells	0.7218	0.005249	0.3091
-CD8Tcells	0.5241	0.203252	0.1655
-NK	0.7638	0.331108	0.0408
 
 
 @author: I.Azuma
@@ -114,7 +107,7 @@ class GumbelSoftmax(nn.Module):
         y = logits + self.sample_gumbel(logits.size(), logits.is_cuda)
         return F.softmax(y / temperature, dim=-1)
 
-    def gumbel_softmax(self, logits, temperature, ):
+    def gumbel_softmax(self, logits, temperature):
         y = self.gumbel_softmax_sample(logits, temperature)
         return y
 
@@ -238,12 +231,7 @@ class DANN_SEM_AD(nn.Module):
     def __init__(self, x_dim, z_dim, y_dim, n_celltype, n_gene, adj_A=None, pred_loss_type='L1',seed=42, da_option=True):
         super(DANN_SEM_AD, self).__init__()
         self.seed = seed
-        cudnn.deterministic = True
-        cudnn.benchmark = False
-
-        torch.cuda.manual_seed_all(self.seed)
-        torch.manual_seed(self.seed)
-        random.seed(self.seed)
+        set_random_seed(self.seed)
 
         if adj_A is None:
             adj_A = initialize_A(topic_nums=n_gene, seed=self.seed)
@@ -312,19 +300,67 @@ class DANN_SEM_AD(nn.Module):
         loss_gauss = self.losses.gaussian_loss(z, output['mean'], output['var'], output['y_mean'], output['y_var'])
         loss_cat = (-self.losses.entropy(output['logits'], output['prob_cat']) - np.log(0.1))
 
-        return loss_rec, loss_gauss, loss_cat, output, out_inf
+        return loss_rec, loss_gauss, loss_cat, output
     
+    def inf_gen(self, source_x, target_x, temperature=1.0, dropout_mask=None, calc_loss=True):
+        """target_x = next(iter(test_target_loader))[0]"""
+        # preprocessing
+        source_x = Variable(source_x.cuda()).view(source_x.size(0), -1, 1)
+        target_x = Variable(target_x.cuda()).view(target_x.size(0), -1, 1)
+        mask = Variable(torch.from_numpy(np.ones(self.n_gene) - np.eye(self.n_gene)).float(), requires_grad=False).cuda()
+        adj_t = self._one_minus_A_t(self.adj_A * mask)
+        adj_t_inv = torch.inverse(adj_t)
+        x_ori = torch.cat([source_x, target_x], dim=0)
+        input_x = x_ori.view(x_ori.size(0), -1, 1)
+
+        # encoder
+        out_inf = self.inference_t(input_x, adj_t, temperature)
+        z, y = out_inf['gaussian'], out_inf['categorical']
+
+        # decoder
+        out_gen = self.generative_t(z, y, adj_t_inv)
+
+        # summarize
+        output = out_inf
+        for key, value in out_gen.items():
+            output[key] = value
+        
+        if calc_loss:
+            loss_rec = self.losses.reconstruction_loss(x_ori[source_x.shape[0]:].squeeze(-1), output['x_rec'][source_x.shape[0]:], dropout_mask, 'mse')
+            loss_gauss = self.losses.gaussian_loss(z, output['mean'], output['var'], output['y_mean'], output['y_var'])
+            loss_cat = (-self.losses.entropy(output['logits'], output['prob_cat']) - np.log(0.1))
+            return loss_rec, loss_gauss, loss_cat, output
+        else:
+            return output
+
+    def forward(self, source_x, target_x, dropout_mask, temperature=1.0, calc_loss=True):
+        # target data
+        if calc_loss:
+            loss_rec, loss_gauss, loss_cat, output = self.inf_gen(source_x, target_x, temperature, dropout_mask, calc_loss=calc_loss)
+            loss_dict = {'loss_rec': loss_rec, 'loss_gauss': loss_gauss, 'loss_cat': loss_cat}
+            source_embed = output['gaussian'][:source_x.shape[0]]
+            target_embed = output['gaussian'][source_x.shape[0]:]
+
+            return (source_embed, target_embed), loss_dict
+        else:
+            output = self.inf_gen(source_x, target_x, temperature, dropout_mask, calc_loss=calc_loss)
+            source_embed = output['gaussian'][:source_x.shape[0]]
+            target_embed = output['gaussian'][source_x.shape[0]:]
+
+            return (source_embed, target_embed)
+
     
-    def forward(self, source_x, target_x, source_y, dropout_mask, temperature=1.0):
+    def legacy(self, source_x, target_x, source_y, dropout_mask, temperature=1.0):
         assert source_y.shape[1] == self.n_celltype
         mask = Variable(torch.from_numpy(np.ones(self.n_gene) - np.eye(self.n_gene)).float(), requires_grad=False).cuda()
 
         adj_A_t = self._one_minus_A_t(self.adj_A * mask)
+        self.adj_A_t = adj_A_t
 
         # target data
         source_x = source_x.view(source_x.size(0), -1, 1)
         target_x = target_x.view(target_x.size(0), -1, 1)
-        loss_rec, loss_gauss, loss_cat, output, out_inf = self.target_block(source_x, target_x, adj_A_t, dropout_mask, temperature)
+        loss_rec, loss_gauss, loss_cat, output = self.target_block(source_x, target_x, adj_A_t, dropout_mask, temperature)
 
         source_embed = output['gaussian'][:source_x.shape[0]]
         target_embed = output['gaussian'][source_x.shape[0]:]
@@ -415,5 +451,13 @@ def seed_worker(worker_id):
     worker_seed = torch.initial_seed() % 2**32
     np.random.seed(worker_seed)
     random.seed(worker_seed)
+
+def set_random_seed(seed):
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    random.seed(seed)
+    np.random.seed(seed)
+    cudnn.deterministic = True
+    cudnn.benchmark = False
 
 # %%
