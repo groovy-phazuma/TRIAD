@@ -241,9 +241,9 @@ class DANN_SEM_AD(nn.Module):
         self.n_celltype = n_celltype
         self.pred_loss_type = pred_loss_type
         nonLinear = nn.Tanh()
-        self.inference_s = InferenceNet(x_dim, z_dim, y_dim, n_gene, nonLinear)  # FIXME: Not used.
+        #self.inference_s = InferenceNet(x_dim, z_dim, y_dim, n_gene, nonLinear)  # FIXME: Not used.
         self.inference_t = InferenceNet(x_dim, z_dim, y_dim, n_gene, nonLinear)
-        self.generative_s = GenerativeNet(x_dim, z_dim, y_dim, n_gene, nonLinear)  # FIXME: Not used.
+        #self.generative_s = GenerativeNet(x_dim, z_dim, y_dim, n_gene, nonLinear)  # FIXME: Not used.
         self.generative_t = GenerativeNet(x_dim, z_dim, y_dim, n_gene, nonLinear)
         self.predictor = nn.Sequential(  # FIXME: Could be a little simpler.
             MLPBlock(n_gene, n_gene//2, 0.2),
