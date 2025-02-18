@@ -89,8 +89,9 @@ class MultiTaskAutoEncoder(nn.Module):
         self.lr = option_list['learning_rate']
         self.early_stop = option_list['early_stop']
         self.outdir = option_list['SaveResultsDir']
-        self.rec_weight = 1  # FIXME
-        self.pred_weight = 100  # FIXME
+
+        self.rec_w = option_list['rec_w']
+        self.pred_w = option_list['pred_w']
 
         self.losses = LossFunctions()
 
@@ -154,15 +155,15 @@ class MultiTaskAutoEncoder(nn.Module):
                 pred_loss = self.losses.summarize_loss(source_pred, source_y.cuda())
                 pred_loss_epoch += pred_loss.data.item()
 
-                loss = (self.rec_weight*rec_loss) + (self.pred_weight*pred_loss)
+                loss = (self.rec_w*rec_loss) + (self.pred_w*pred_loss)
 
                 # update weights
                 optimizer.zero_grad()
                 loss.backward(retain_graph=True)
                 optimizer.step()
             
-            rec_loss_epoch /= len(self.train_source_loader)
-            pred_loss_epoch /= len(self.train_source_loader)
+            rec_loss_epoch = self.rec_w * rec_loss_epoch / len(self.train_source_loader)
+            pred_loss_epoch = self.pred_w * pred_loss_epoch / len(self.train_source_loader)
             loss_all = rec_loss_epoch + pred_loss_epoch
 
             self.metric_logger['rec_loss'].append(rec_loss_epoch)
@@ -190,10 +191,13 @@ class MultiTaskAutoEncoder(nn.Module):
         self.model_da.load_state_dict(torch.load(model_path))
         self.model_da.eval()
 
-    def prediction(self):
+    def prediction(self, test_target_loader=None):
+        if test_target_loader is None:
+            test_target_loader = self.test_target_loader
+            
         self.model_da.eval()
         preds, gt = None, None
-        for batch_idx, (x, y) in enumerate(self.test_target_loader):
+        for batch_idx, (x, y) in enumerate(test_target_loader):
             logits = self.predictor(self.encoder(x.cuda())).detach().cpu().numpy()
             frac = y.detach().cpu().numpy()
             preds = logits if preds is None else np.concatenate((preds, logits), axis=0)
@@ -234,7 +238,7 @@ class MultiTaskAutoEncoder(nn.Module):
         self.train_target_loader = DataLoader(dataset=target_dataset, batch_size=batch_size, shuffle=True, worker_init_fn=seed_worker, generator=g)
         self.test_target_loader = Data.DataLoader(dataset=target_dataset, batch_size=batch_size, shuffle=False)
 
-def preprocess(trainingdatapath, source='data6k', target='sdy67', n_samples=None):
+def preprocess(trainingdatapath, source='data6k', target='sdy67', n_samples=None, n_vtop=None):
     assert target in ['sdy67', 'GSE65133', 'donorA', 'donorC', 'data6k', 'data8k']
     pbmc = sc.read_h5ad(trainingdatapath)
     test = pbmc[pbmc.obs['ds']==target]
@@ -264,13 +268,21 @@ def preprocess(trainingdatapath, source='data6k', target='sdy67', n_samples=None
     train_y = train.obs.iloc[:,:-2]
     test_y = test.obs.iloc[:,:-2]
 
-    #### top 1000 highly variable genes
-    label = np.argsort(-train.X.var(axis=0))[:1000]
+    
+    if n_vtop is None:
+        #### variance cut off
+        label = test.X.var(axis=0) > 0.1  # FIXME: mild cut-off
+    else:
+        #### top 1000 highly variable genes
+        label = np.argsort(-train.X.var(axis=0))[:n_vtop]
     
     train_data = train[:, label]
     train_data.X = np.log2(train_data.X + 1)
     test_data = test[:, label]
     test_data.X = np.log2(test_data.X + 1)
+
+    print("Train data shape: ", train_data.X.shape)
+    print("Test data shape: ", test_data.X.shape)
 
     return train_data, test_data, train_y, test_y
 
