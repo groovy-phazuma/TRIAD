@@ -1,10 +1,8 @@
 # -*- coding: utf-8 -*-
 """
-Created on 2025-02-15 (Sat) 14:35:22
+Created on 2025-02-21 (Fri) 09:06:45
 
-Simple Autoencoder Model for Deconvolution
-- Conditional Reconstruction
-- scpDeconv-based domain adaptation
+Domain adaptation with Gradient Reversal Layer (GRL)
 
 @author: I.Azuma
 """
@@ -14,6 +12,7 @@ import numpy as np
 import pandas as pd
 from tqdm import tqdm
 from collections import defaultdict
+from sklearn.metrics import roc_auc_score
 
 import torch
 import torch.nn as nn
@@ -68,6 +67,7 @@ class EncoderBlock(nn.Module):
     def __init__(self, in_dim, out_dim, do_rates):
         super(EncoderBlock, self).__init__()
         self.layer = nn.Sequential(nn.Linear(in_dim, out_dim),
+                                   #nn.BatchNorm1d(out_dim),
                                    nn.LeakyReLU(0.2, inplace=True),
                                    nn.Dropout(p=do_rates, inplace=False))
     def forward(self, x):
@@ -78,11 +78,45 @@ class DecoderBlock(nn.Module):
     def __init__(self, in_dim, out_dim, do_rates):
         super(DecoderBlock, self).__init__()
         self.layer = nn.Sequential(nn.Linear(in_dim, out_dim),
+                                   #nn.BatchNorm1d(out_dim),
                                    nn.LeakyReLU(0.2, inplace=True),
                                    nn.Dropout(p=do_rates, inplace=False))
     def forward(self, x):
         out = self.layer(x)
         return out
+
+# GRL (Gradient Reversal Layer)
+"""
+class GradientReversalLayer(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, x, alpha):
+        ctx.alpha = alpha
+        return x
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        return -ctx.alpha * grad_output, None
+"""
+
+class GradientReversalLayer(torch.autograd.Function):
+    @staticmethod
+    def forward(context, x, constant):
+        context.constant = constant
+        return x.view_as(x) * constant
+
+    @staticmethod
+    def backward(context, grad):
+        return grad.neg() * context.constant, None
+
+
+class GRL(nn.Module):
+    def __init__(self, alpha=1.0):
+        super(GRL, self).__init__()
+        self.alpha = alpha
+
+    def forward(self, x):
+        return GradientReversalLayer.apply(x, self.alpha)
+
 
 class MultiTaskAutoEncoder(nn.Module):
     def __init__(self, option_list, seed=42):
@@ -118,13 +152,14 @@ class MultiTaskAutoEncoder(nn.Module):
         self.decoder = nn.Sequential(DecoderBlock(self.latent_dim, 512, 0.2),
                                      DecoderBlock(512, self.feature_num, 0))
 
-        self.predictor = nn.Sequential(EncoderBlock(self.latent_dim, 128, 0.2),
+        self.predictor = nn.Sequential(EncoderBlock(self.latent_dim, 64, 0.2),
                                        nn.Linear(64, self.celltype_num),
                                        nn.Softmax(dim=1))
         
-        self.discriminator = nn.Sequential(EncoderBlock(self.latent_dim, 128, 0.2),
+        self.discriminator = nn.Sequential(GRL(alpha=0.5),  # Gradient Reversal Layer
+                                           EncoderBlock(self.latent_dim, 64, 0.2),
                                            nn.Linear(64, 1),
-                                           nn.Sigmoid())
+                                           nn.Sigmoid()) 
 
         model_da = nn.ModuleList([])
         model_da.append(self.encoder)
@@ -132,27 +167,15 @@ class MultiTaskAutoEncoder(nn.Module):
         model_da.append(self.predictor)
         model_da.append(self.discriminator)
         return model_da
-
-    def train_3steps(self, source_data, target_data):
-        ### prepare model structure ###
+    
+    def train(self, source_data, target_data):
+        # prepare model structure
         self.prepare_dataloader(source_data, target_data, self.batch_size)
         self.model_da = self.MTAE_model().cuda()
 
         # setup optimizer
-        optimizer = torch.optim.Adam([{'params': self.encoder.parameters()},
-                                      {'params': self.decoder.parameters()},],
-                                      lr=self.lr*0.2)  # FIXME: 0.2
-        optimizer_pred = torch.optim.Adam([{'params': self.encoder.parameters()},
-                                           {'params': self.predictor.parameters()},
-                                           #{'params': self.decoder.parameters()},  # NOTE: is it necessary?
-                                           {'params': self.discriminator.parameters()},],
-                                           lr=self.lr)
-        optimizer_da = torch.optim.Adam([{'params': self.encoder.parameters()},
-                                         #{'params': self.decoder.parameters()},  # NOTE: is it necessary?
-                                         {'params': self.discriminator.parameters()},],
-                                         lr=self.lr)
-        #scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=10, gamma=0.9)
-        
+        optimizer = torch.optim.Adam(self.model_da.parameters(), lr=self.lr)
+
         criterion_da = nn.BCELoss().cuda()
         source_label = torch.ones(self.batch_size).unsqueeze(1).cuda()   # source domain label as 1
         target_label = torch.zeros(self.batch_size).unsqueeze(1).cuda()  # target domain label as 0
@@ -163,34 +186,23 @@ class MultiTaskAutoEncoder(nn.Module):
         for epoch in range(self.num_epochs):
             self.model_da.train()
             train_target_iterator = iter(self.train_target_loader)
-            rec_loss_epoch, pred_loss_epoch, disc_loss_epoch, disc_loss_da_epoch = 0., 0., 0., 0.
+            rec_loss_epoch, pred_loss_epoch, disc_loss_da_epoch = 0., 0., 0.
+            all_preds = []
+            all_labels = []
             for batch_idx, (source_x, source_y) in enumerate(self.train_source_loader):
-                #target_x = next(iter(self.test_target_loader))[0]  # NOTE: without shuffle
                 target_x = next(iter(self.train_target_loader))[0]   # NOTE: shuffle
+                
+                source_emb = self.encoder(source_x.cuda())
+                target_emb = self.encoder(target_x.cuda())
+                source_rec = self.decoder(source_emb)
+                target_rec = self.decoder(target_emb)
 
                 #### 1. reconstruction
-                source_emb = self.encoder(source_x.cuda())
-                target_emb = self.encoder(target_x.cuda())
-                source_rec = self.decoder(source_emb)
-                target_rec = self.decoder(target_emb)
                 rec_loss = self.losses.reconstruction_loss(target_x.cuda(), target_rec, rec_type='mse') + self.losses.reconstruction_loss(source_x.cuda(), source_rec, rec_type='mse')
                 rec_loss_epoch += rec_loss.data.item()
 
-                loss = self.rec_w * rec_loss
-
-                # update weights
-                optimizer.zero_grad()
-                loss.backward(retain_graph=True)
-                optimizer.step()
-
-                #### 2. prediction and classification
-                source_emb = self.encoder(source_x.cuda())
-                target_emb = self.encoder(target_x.cuda())
+                #### 2. prediction
                 source_pred = self.predictor(source_emb)
-                source_domain = self.discriminator(source_emb)
-                target_domain = self.discriminator(target_emb)
-
-                # calculate prediction loss
                 if self.pred_loss_type == 'L1':
                     pred_loss = self.losses.L1_loss(source_pred, source_y.cuda())
                 elif self.pred_loss_type == 'custom':
@@ -199,178 +211,51 @@ class MultiTaskAutoEncoder(nn.Module):
                     raise ValueError("Invalid prediction loss type.")
                 pred_loss_epoch += pred_loss.data.item()
 
-                # calculate classification loss
-                disc_loss = criterion_da(source_domain, source_label[0:source_domain.shape[0],]) + criterion_da(target_domain, target_label[0:target_domain.shape[0],])
-                disc_loss_epoch += disc_loss.data.item()
-
-                loss2 = (self.pred_w*pred_loss) + (self.disc_w*disc_loss)
-
-                # update weights
-                optimizer_pred.zero_grad()
-                loss2.backward(retain_graph=True)
-                optimizer_pred.step()
-
-                #### 3. domain classification (reversed label)
-                source_emb = self.encoder(source_x.cuda())
-                target_emb = self.encoder(target_x.cuda())
+                #### 3. domain classification
                 source_domain = self.discriminator(source_emb)
                 target_domain = self.discriminator(target_emb)
 
-                # calculate classification loss
-                disc_loss_da = criterion_da(source_domain, target_label[0:source_domain.shape[0],]) + criterion_da(target_domain, source_label[0:target_domain.shape[0],])
+                all_preds.extend(source_domain.cpu().detach().numpy().flatten())  # Source domain predictions
+                all_preds.extend(target_domain.cpu().detach().numpy().flatten())  # Target domain predictions
+                all_labels.extend([1]*source_domain.shape[0])  # Source domain labels
+                all_labels.extend([0]*target_domain.shape[0])  # Target domain labels
+
+                disc_loss_da = criterion_da(source_domain, source_label[0:source_domain.shape[0],]) + criterion_da(target_domain, target_label[0:target_domain.shape[0],])
                 disc_loss_da_epoch += disc_loss_da.data.item()
 
-                loss_da = self.disc_w*disc_loss_da
+                #### 4. total loss and optimization
+                loss = self.rec_w * rec_loss + self.pred_w * pred_loss + self.disc_w * disc_loss_da
 
-                # update weights
-                optimizer_da.zero_grad()
-                loss_da.backward(retain_graph=True)
-                optimizer_da.step()
-
-            #scheduler_da.step()
-            
-            rec_loss_epoch = self.rec_w * rec_loss_epoch / len(self.train_source_loader)
-            pred_loss_epoch = self.pred_w * pred_loss_epoch / len(self.train_source_loader)
-            disc_loss_epoch = self.disc_w * disc_loss_epoch / len(self.train_source_loader)
-            disc_loss_da_epoch = self.disc_w * disc_loss_da_epoch / len(self.train_source_loader)
-            loss_all = rec_loss_epoch + pred_loss_epoch + disc_loss_epoch + disc_loss_da_epoch
-
-            self.metric_logger['rec_loss'].append(rec_loss_epoch)
-            self.metric_logger['pred_loss'].append(pred_loss_epoch)
-            self.metric_logger['disc_loss'].append(disc_loss_epoch)
-            self.metric_logger['disc_loss_DA'].append(disc_loss_da_epoch)
-            self.metric_logger['total_loss'].append(loss_all)
-
-            if epoch % 10 == 0:
-                print(f"Epoch:{epoch}, Loss:{loss_all:.3f}, rec:{rec_loss_epoch:.3f}, pred:{pred_loss_epoch:.3f}, disc:{disc_loss_epoch:.3f}, disc_DA:{disc_loss_da_epoch:.3f}")    
-
-                # save best model
-                target_loss = self.metric_logger[self.loss_ref][-1]
-                #target_loss = rec_loss_epoch + pred_loss_epoch  # FIXME: rec + pred
-                if target_loss < best_loss:
-                    update_flag = 0
-                    best_loss = target_loss
-                    self.metric_logger['best_epoch'] = epoch
-                    torch.save(self.model_da.state_dict(), os.path.join(self.outdir, 'best_model.pth'))
-                    # print("Save model at epoch %d" % (epoch))
-                else:
-                    update_flag += 1
-                    # early stopping
-                    if update_flag == self.early_stop:
-                        print("Early stopping at epoch %d" % (epoch+1))
-                        break
-
-    def train(self, source_data, target_data):
-        ### prepare model structure ###
-        self.prepare_dataloader(source_data, target_data, self.batch_size)
-        self.model_da = self.MTAE_model().cuda()
-
-        # setup optimizer
-        optimizer = torch.optim.Adam([{'params': self.encoder.parameters()},
-                                      {'params': self.decoder.parameters()},
-                                      {'params': self.predictor.parameters()},
-                                      {'params': self.discriminator.parameters()}],
-                                      lr=self.lr)
-        optimizer_da = torch.optim.Adam([{'params': self.encoder.parameters()},
-                                         {'params': self.discriminator.parameters()},],
-                                         lr=self.lr)
-        scheduler_da = torch.optim.lr_scheduler.StepLR(optimizer_da, step_size=10, gamma=0.9)
-        
-        criterion_da = nn.BCELoss().cuda()
-        source_label = torch.ones(self.batch_size).unsqueeze(1).cuda()   # source domain label as 1
-        target_label = torch.zeros(self.batch_size).unsqueeze(1).cuda()  # target domain label as 0
-
-        self.metric_logger = defaultdict(list) 
-        best_loss = 1e10  
-        update_flag = 0  
-        for epoch in range(self.num_epochs):
-            self.model_da.train()
-            train_target_iterator = iter(self.train_target_loader)
-            rec_loss_epoch, pred_loss_epoch, disc_loss_epoch, disc_loss_da_epoch = 0., 0., 0., 0.
-            for batch_idx, (source_x, source_y) in enumerate(self.train_source_loader):
-                #target_x = next(iter(self.test_target_loader))[0]  # NOTE: without shuffle
-                target_x = next(iter(self.train_target_loader))[0]   # NOTE: shuffle
-
-                #### 1. reconstruction, prediction, and domain classification
-                source_emb = self.encoder(source_x.cuda())
-                target_emb = self.encoder(target_x.cuda())
-                source_pred = self.predictor(source_emb)
-                source_domain = self.discriminator(source_emb)
-                target_domain = self.discriminator(target_emb)
-
-                # calculate reconstruction loss
-                source_rec = self.decoder(source_emb)
-                target_rec = self.decoder(target_emb)
-                rec_loss = self.losses.reconstruction_loss(target_x.cuda(), target_rec, rec_type='mse') + self.losses.reconstruction_loss(source_x.cuda(), source_rec, rec_type='mse')
-                rec_loss_epoch += rec_loss.data.item()
-
-                # calculate prediction loss
-                if self.pred_loss_type == 'L1':
-                    pred_loss = self.losses.L1_loss(source_pred, source_y.cuda())
-                elif self.pred_loss_type == 'custom':
-                    pred_loss = self.losses.summarize_loss(source_pred, source_y.cuda())
-                else:
-                    raise ValueError("Invalid prediction loss type.")
-                
-                pred_loss_epoch += pred_loss.data.item()
-
-                # calculate classification loss
-                disc_loss = criterion_da(source_domain, source_label[0:source_domain.shape[0],]) + criterion_da(target_domain, target_label[0:target_domain.shape[0],])
-                disc_loss_epoch += disc_loss.data.item()
-
-                loss = (self.rec_w*rec_loss) + (self.pred_w*pred_loss) + (self.disc_w*disc_loss)
-
-                # update weights
                 optimizer.zero_grad()
-                loss.backward(retain_graph=True)
+                loss.backward()
                 optimizer.step()
-
-                #### 2. prediction, and domain classification (reversed label)
-                source_emb = self.encoder(source_x.cuda())
-                target_emb = self.encoder(target_x.cuda())
-                source_domain = self.discriminator(source_emb)
-                target_domain = self.discriminator(target_emb)
-
-                # calculate classification loss
-                disc_loss_da = criterion_da(source_domain, target_label[0:source_domain.shape[0],]) + criterion_da(target_domain, source_label[0:target_domain.shape[0],])
-                disc_loss_da_epoch += disc_loss_da.data.item()
-
-                loss_da = self.disc_w*disc_loss_da
-
-                # update weights
-                optimizer_da.zero_grad()
-                loss_da.backward(retain_graph=True)
-                optimizer_da.step()
-
-            #scheduler_da.step()
             
             rec_loss_epoch = self.rec_w * rec_loss_epoch / len(self.train_source_loader)
             pred_loss_epoch = self.pred_w * pred_loss_epoch / len(self.train_source_loader)
-            disc_loss_epoch = self.disc_w * disc_loss_epoch / len(self.train_source_loader)
             disc_loss_da_epoch = self.disc_w * disc_loss_da_epoch / len(self.train_source_loader)
-            loss_all = rec_loss_epoch + pred_loss_epoch + disc_loss_epoch + disc_loss_da_epoch
+            loss_all = rec_loss_epoch + pred_loss_epoch + disc_loss_da_epoch
+
+            auc_score = roc_auc_score(all_labels, all_preds)
 
             self.metric_logger['rec_loss'].append(rec_loss_epoch)
             self.metric_logger['pred_loss'].append(pred_loss_epoch)
-            self.metric_logger['disc_loss'].append(disc_loss_epoch)
             self.metric_logger['disc_loss_DA'].append(disc_loss_da_epoch)
             self.metric_logger['total_loss'].append(loss_all)
+            self.metric_logger['disc_auc'].append(auc_score)
 
             if epoch % 10 == 0:
-                print(f"Epoch:{epoch}, Loss:{loss_all:.3f}, rec:{rec_loss_epoch:.3f}, pred:{pred_loss_epoch:.3f}, disc:{disc_loss_epoch:.3f}, disc_DA:{disc_loss_da_epoch:.3f}")    
+                print(f"Epoch:{epoch}, Loss:{loss_all:.3f}, rec:{rec_loss_epoch:.3f}, pred:{pred_loss_epoch:.3f}, disc_da:{disc_loss_da_epoch:.3f}, disc_auc:{auc_score:.3f}")    
 
                 # save best model
-                target_loss = self.metric_logger[self.loss_ref][-1]
-                #target_loss = rec_loss_epoch + pred_loss_epoch  # FIXME: rec + pred
+                #target_loss = self.metric_logger[self.loss_ref][-1]
+                target_loss = rec_loss_epoch + pred_loss_epoch
                 if target_loss < best_loss:
                     update_flag = 0
                     best_loss = target_loss
                     self.metric_logger['best_epoch'] = epoch
                     torch.save(self.model_da.state_dict(), os.path.join(self.outdir, 'best_model.pth'))
-                    # print("Save model at epoch %d" % (epoch))
                 else:
                     update_flag += 1
-                    # early stopping
                     if update_flag == self.early_stop:
                         print("Early stopping at epoch %d" % (epoch+1))
                         break
