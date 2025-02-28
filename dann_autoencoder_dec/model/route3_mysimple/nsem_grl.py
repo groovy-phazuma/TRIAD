@@ -1,11 +1,13 @@
 # -*- coding: utf-8 -*-
 """
-Created on 2025-02-21 (Fri) 09:06:45
+Created on 2025-02-27 (Thu) 12:09:39
 
-Domain adaptation with Gradient Reversal Layer (GRL)
+- Nonlinear Structural Equation Model (NSEM)
+- Domain adaptation with Gradient Reversal Layer (GRL)
 
 @author: I.Azuma
 """
+# %%
 import os
 import random
 import numpy as np
@@ -64,40 +66,71 @@ class LossFunctions:
 
 
 class EncoderBlock(nn.Module):
-    def __init__(self, in_dim, out_dim, do_rates):
+    def __init__(self,topic_num_1,topic_num_2,topic_num_3,n_genes,hidden_num):
         super(EncoderBlock, self).__init__()
-        self.layer = nn.Sequential(nn.Linear(in_dim, out_dim),
-                                   #nn.BatchNorm1d(out_dim),
-                                   nn.LeakyReLU(0.2, inplace=True),
-                                   nn.Dropout(p=do_rates, inplace=False))
-    def forward(self, x):
-        out = self.layer(x)
+        self.enc_layer0 = nn.Sequential(nn.Linear(n_genes, topic_num_1),
+                                        #nn.BatchNorm1d(topic_num_1),
+                                        nn.LeakyReLU(0.2, inplace=True),
+                                        nn.Dropout(p=do_rates, inplace=False))
+        self.enc_layer1 = nn.Sequential(nn.Linear(topic_num_1, topic_num_2),
+                                        #nn.BatchNorm1d(topic_num_2),
+                                        nn.LeakyReLU(0.2, inplace=True),
+                                        nn.Dropout(p=do_rates, inplace=False))
+        self.enc_layer2 = nn.Sequential(nn.Linear(topic_num_2, topic_num_3),
+                                        #nn.BatchNorm1d(topic_num_3),
+                                        nn.LeakyReLU(0.2, inplace=True),
+                                        nn.Dropout(p=do_rates, inplace=False))
+        self.enc_layer3 = nn.Sequential(nn.Linear(topic_num_3, hidden_num),
+                                        #nn.BatchNorm1d(hidden_num),
+                                        nn.LeakyReLU(0.2, inplace=True),
+                                        nn.Dropout(p=do_rates, inplace=False))
+
+    def forward(self, x, adj1, adj2, adj3):
+        x_0 = self.enc_layer0(x)
+        x_1 = torch.matmul(adj1.to(torch.float32),x0.squeeze(2).T).T
+        x_2 = self.enc_layer1(x_1)
+        x_2 = torch.matmul(adj_2.to(torch.float32),x_2.T).T
+        x_3 = self.enc_layer2(x_2)
+        x_3 = torch.matmul(adj_3.to(torch.float32),x_3.T).T
+        out = self.enc_layer3(x_3)
+
         return out
 
 class DecoderBlock(nn.Module):
-    def __init__(self, in_dim, out_dim, do_rates):
+    def __init__(self,topic_num_1,topic_num_2,topic_num_3,hidden_num):
         super(DecoderBlock, self).__init__()
-        self.layer = nn.Sequential(nn.Linear(in_dim, out_dim),
-                                   #nn.BatchNorm1d(out_dim),
-                                   nn.LeakyReLU(0.2, inplace=True),
-                                   nn.Dropout(p=do_rates, inplace=False))
-    def forward(self, x):
-        out = self.layer(x)
+        self.dec_layer1 = nn.Sequential(nn.Linear(hidden_num, topic_num_3),
+                                        #nn.BatchNorm1d(topic_num_3),
+                                        nn.LeakyReLU(0.2, inplace=True),
+                                        nn.Dropout(p=do_rates, inplace=False))
+        self.dec_layer2 = nn.Sequential(nn.Linear(topic_num_3, topic_num_2),
+                                        #nn.BatchNorm1d(topic_num_2),
+                                        nn.LeakyReLU(0.2, inplace=True),
+                                        nn.Dropout(p=do_rates, inplace=False))
+        self.dec_layer3 = nn.Sequential(nn.Linear(topic_num_2, topic_num_1),
+                                        #nn.BatchNorm1d(topic_num_1),
+                                        nn.LeakyReLU(0.2, inplace=True),
+                                        nn.Dropout(p=do_rates, inplace=False))
+        
+        if True:
+            print('Constraining decoder to positive weights', flush=True)
+
+            self.dec_layer1[0].reset_params_pos()
+            self.dec_layer1[0].weight.data *= self.dec_layer1[0].mask        
+            self.dec_layer2[0].reset_params_pos()    
+            self.dec_layer2[0].weight.data *= self.dec_layer2[0].mask 
+
+    def forward(self, z, adj1_inv, adj2_inv, adj3_inv):
+        z_1 = torch.matmul(adj3_inv.to(torch.float32), z.T).T
+        z_2 = self.dec_layer1(z_1)
+        z_2 = torch.matmul(adj2_inv.to(torch.float32), z_2.T).T
+        z_3 = self.dec_layer2(z_2)
+        z_3 = torch.matmul(adj1_inv.to(torch.float32), z_3.T).T
+        out = self.dec_layer3(z_3)
+
         return out
 
 # GRL (Gradient Reversal Layer)
-"""
-class GradientReversalLayer(torch.autograd.Function):
-    @staticmethod
-    def forward(ctx, x, alpha):
-        ctx.alpha = alpha
-        return x
-
-    @staticmethod
-    def backward(ctx, grad_output):
-        return -ctx.alpha * grad_output, None
-"""
-
 class GradientReversalLayer(torch.autograd.Function):
     @staticmethod
     def forward(context, x, constant):
@@ -109,15 +142,6 @@ class GradientReversalLayer(torch.autograd.Function):
         return grad.neg() * context.constant, None
 
 
-class GRL(nn.Module):
-    def __init__(self, alpha=1.0):
-        super(GRL, self).__init__()
-        self.alpha = alpha
-
-    def forward(self, x):
-        return GradientReversalLayer.apply(x, self.alpha)
-
-
 class MultiTaskAutoEncoder(nn.Module):
     def __init__(self, option_list, seed=42):
         super(MultiTaskAutoEncoder, self).__init__()
@@ -126,6 +150,12 @@ class MultiTaskAutoEncoder(nn.Module):
         self.feature_num = option_list['feature_num']
         self.latent_dim = option_list['latent_dim']
         self.celltype_num = option_list['celltype_num']
+        self.gene_num = option_list['gene_num']
+        self.topic_num_1 = option_list['topic_num_1']
+        self.topic_num_2 = option_list['topic_num_2']
+        self.topic_num_3 = option_list['topic_num_3']
+
+
         self.num_epochs = option_list['epochs']
         self.lr = option_list['learning_rate']
         self.early_stop = option_list['early_stop']
@@ -144,125 +174,43 @@ class MultiTaskAutoEncoder(nn.Module):
         torch.cuda.manual_seed_all(self.seed)
         torch.manual_seed(self.seed)
         random.seed(self.seed)
-    
-    def MTAE_model(self):
-        self.encoder = nn.Sequential(EncoderBlock(self.feature_num, 512, 0), 
-                                     EncoderBlock(512, self.latent_dim, 0.2))
-                                     
-        self.decoder = nn.Sequential(DecoderBlock(self.latent_dim, 512, 0.2),
-                                     DecoderBlock(512, self.feature_num, 0))
+
+        self.encoder = EncoderBlock(topic_num_1 = self.topic_num_1,
+                                    topic_num_2 = self.topic_num_2,
+                                    topic_num_3 = self.topic_num_3,
+                                    n_genes = self.gene_num,
+                                    hidden_num=self.feature_num)
+        self.decoder = DecoderBlock(topic_num_1 = self.topic_num_1,
+                                    topic_num_2 = self.topic_num_2,
+                                    topic_num_3 = self.topic_num_3,
+                                    hidden_num=self.feature_num)
 
         self.predictor = nn.Sequential(EncoderBlock(self.latent_dim, 64, 0.2),
                                        nn.Linear(64, self.celltype_num),
                                        nn.Softmax(dim=1))
         
-        self.discriminator = nn.Sequential(GRL(alpha=0.5),  # Gradient Reversal Layer
-                                           EncoderBlock(self.latent_dim, 64, 0.2),
+        self.discriminator = nn.Sequential(nn.Linear(self.latent_dim, 64),
+                                           nn.BatchNorm1d(64),
+                                           nn.LeakyReLU(0.2, inplace=True),
+                                           nn.Dropout(p=0.2, inplace=False),
                                            nn.Linear(64, 1),
                                            nn.Sigmoid()) 
 
-        model_da = nn.ModuleList([])
-        model_da.append(self.encoder)
-        model_da.append(self.decoder)
-        model_da.append(self.predictor)
-        model_da.append(self.discriminator)
-        return model_da
     
-    def train(self, source_data, target_data):
-        # prepare model structure
-        self.prepare_dataloader(source_data, target_data, self.batch_size)
-        self.model_da = self.MTAE_model().cuda()
+    def forward(self, x, alpha=1.0):
+        batch_size = x.size(0)
+        emb = self.encoder(x).view(batch_size, -1)
 
-        # setup optimizer
-        optimizer = torch.optim.Adam(self.model_da.parameters(), lr=self.lr)
+        rec = self.decoder(emb)
+        pred = self.predictor(emb)
 
-        criterion_da = nn.BCELoss().cuda()
-        source_label = torch.ones(self.batch_size).unsqueeze(1).cuda()   # source domain label as 1
-        target_label = torch.zeros(self.batch_size).unsqueeze(1).cuda()  # target domain label as 0
+        domain_emb = GradientReversalLayer.apply(emb, alpha)
+        domain = self.discriminator(domain_emb)
 
-        self.metric_logger = defaultdict(list) 
-        best_loss = 1e10  
-        update_flag = 0  
-        for epoch in range(self.num_epochs):
-            self.model_da.train()
-            train_target_iterator = iter(self.train_target_loader)
-            rec_loss_epoch, pred_loss_epoch, disc_loss_da_epoch = 0., 0., 0.
-            all_preds = []
-            all_labels = []
-            for batch_idx, (source_x, source_y) in enumerate(self.train_source_loader):
-                target_x = next(iter(self.train_target_loader))[0]   # NOTE: shuffle
-                
-                source_emb = self.encoder(source_x.cuda())
-                target_emb = self.encoder(target_x.cuda())
-                source_rec = self.decoder(source_emb)
-                target_rec = self.decoder(target_emb)
-
-                #### 1. reconstruction
-                rec_loss = self.losses.reconstruction_loss(target_x.cuda(), target_rec, rec_type='mse') + self.losses.reconstruction_loss(source_x.cuda(), source_rec, rec_type='mse')
-                rec_loss_epoch += rec_loss.data.item()
-
-                #### 2. prediction
-                source_pred = self.predictor(source_emb)
-                if self.pred_loss_type == 'L1':
-                    pred_loss = self.losses.L1_loss(source_pred, source_y.cuda())
-                elif self.pred_loss_type == 'custom':
-                    pred_loss = self.losses.summarize_loss(source_pred, source_y.cuda())
-                else:
-                    raise ValueError("Invalid prediction loss type.")
-                pred_loss_epoch += pred_loss.data.item()
-
-                #### 3. domain classification
-                source_domain = self.discriminator(source_emb)
-                target_domain = self.discriminator(target_emb)
-
-                all_preds.extend(source_domain.cpu().detach().numpy().flatten())  # Source domain predictions
-                all_preds.extend(target_domain.cpu().detach().numpy().flatten())  # Target domain predictions
-                all_labels.extend([1]*source_domain.shape[0])  # Source domain labels
-                all_labels.extend([0]*target_domain.shape[0])  # Target domain labels
-
-                disc_loss_da = criterion_da(source_domain, source_label[0:source_domain.shape[0],]) + criterion_da(target_domain, target_label[0:target_domain.shape[0],])
-                disc_loss_da_epoch += disc_loss_da.data.item()
-
-                #### 4. total loss and optimization
-                loss = self.rec_w * rec_loss + self.pred_w * pred_loss + self.disc_w * disc_loss_da
-
-                optimizer.zero_grad()
-                loss.backward()
-                optimizer.step()
-            
-            rec_loss_epoch = self.rec_w * rec_loss_epoch / len(self.train_source_loader)
-            pred_loss_epoch = self.pred_w * pred_loss_epoch / len(self.train_source_loader)
-            disc_loss_da_epoch = self.disc_w * disc_loss_da_epoch / len(self.train_source_loader)
-            loss_all = rec_loss_epoch + pred_loss_epoch + disc_loss_da_epoch
-
-            auc_score = roc_auc_score(all_labels, all_preds)
-
-            self.metric_logger['rec_loss'].append(rec_loss_epoch)
-            self.metric_logger['pred_loss'].append(pred_loss_epoch)
-            self.metric_logger['disc_loss_DA'].append(disc_loss_da_epoch)
-            self.metric_logger['total_loss'].append(loss_all)
-            self.metric_logger['disc_auc'].append(auc_score)
-
-            if epoch % 10 == 0:
-                print(f"Epoch:{epoch}, Loss:{loss_all:.3f}, rec:{rec_loss_epoch:.3f}, pred:{pred_loss_epoch:.3f}, disc_da:{disc_loss_da_epoch:.3f}, disc_auc:{auc_score:.3f}")    
-
-                # save best model
-                #target_loss = self.metric_logger[self.loss_ref][-1]
-                target_loss = rec_loss_epoch + pred_loss_epoch
-                if target_loss < best_loss:
-                    update_flag = 0
-                    best_loss = target_loss
-                    self.metric_logger['best_epoch'] = epoch
-                    torch.save(self.model_da.state_dict(), os.path.join(self.outdir, 'best_model.pth'))
-                else:
-                    update_flag += 1
-                    if update_flag == self.early_stop:
-                        print("Early stopping at epoch %d" % (epoch+1))
-                        break
+        return rec, pred, domain
 
 
     def load_checkpoint(self, model_path):
-        self.model_da = self.MTAE_model().cuda()
         self.model_da.load_state_dict(torch.load(model_path))
         self.model_da.eval()
 
@@ -374,3 +322,5 @@ def set_random_seed(seed):
     np.random.seed(seed)
     cudnn.deterministic = True
     cudnn.benchmark = False
+
+

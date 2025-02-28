@@ -21,11 +21,36 @@ def Recon_loss(recon_data, input_data):
     return loss
 
 ### evaluate metrics ###
-def ccc(preds, gt):
+def ccc_legacy(preds, gt):
     numerator = 2 * np.corrcoef(gt, preds)[0][1] * np.std(gt) * np.std(preds)
     denominator = np.var(gt) + np.var(preds) + (np.mean(gt) - np.mean(preds)) ** 2
     ccc_value = numerator / denominator
     return ccc_value
+
+def ccc(y_pred, y_true):
+    # pred: shape{n sample, m cell}
+    if mode == 'all':
+        y_pred = y_pred.reshape(-1, 1)
+        y_true = y_true.reshape(-1, 1)
+
+    ccc_value = 0
+    for i in range(y_pred.shape[1]):
+        r = np.corrcoef(y_pred[:, i], y_true[:, i])[0, 1]
+        # Mean
+        mean_true = np.mean(y_true[:, i])
+        mean_pred = np.mean(y_pred[:, i])
+        # Variance
+        var_true = np.var(y_true[:, i])
+        var_pred = np.var(y_pred[:, i])
+        # Standard deviation
+        sd_true = np.std(y_true[:, i])
+        sd_pred = np.std(y_pred[:, i])
+        # Calculate CCC
+        numerator = 2 * r * sd_true * sd_pred
+        denominator = var_true + var_pred + (mean_true - mean_pred) ** 2
+        ccc = numerator / denominator
+        ccc_value += ccc
+    return ccc_value / y_pred.shape[1]
 
 def compute_metrics(preds, gt):
     gt = gt[preds.columns] # Align pred order and gt order  
