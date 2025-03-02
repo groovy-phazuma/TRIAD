@@ -6,6 +6,10 @@ Created on 2025-02-27 (Thu) 20:18:12
     - Based on DeepSEM
 - Domain adaptation with Gradient Reversal Layer (GRL)
 
+■ Update
+- Removed connector MLP
+- Represent z (out_inf['gaussian']) as more small dimension
+
 @author: I.Azuma
 """
 # %%
@@ -121,11 +125,11 @@ class Gaussian(nn.Module):
         return mu.squeeze(2), logvar.squeeze(2)
 
 class InferenceNet(nn.Module):
-    def __init__(self, x_dim, z_dim, y_dim, n_gene, nonLinear):
+    def __init__(self, x_dim, z_dim, y_dim, nonLinear):
         super(InferenceNet, self).__init__()
         self.inference_qyx = torch.nn.ModuleList([
-            nn.Linear(n_gene, z_dim),
-            nonLinear,
+            #nn.Linear(n_gene, z_dim),
+            #nonLinear,
             nn.Linear(z_dim, z_dim),
             nonLinear,
             GumbelSoftmax(z_dim, y_dim)  # >> logits, prob, y
@@ -172,11 +176,14 @@ class InferenceNet(nn.Module):
         return output
 
 class GenerativeNet(nn.Module):
-    def __init__(self, x_dim, z_dim, y_dim, n_gene, nonLinear):
+    def __init__(self, x_dim, z_dim, y_dim, nonLinear):
         super(GenerativeNet, self).__init__()
-        self.n_gene = n_gene
-        self.y_mu = nn.Sequential(nn.Linear(y_dim, z_dim), nonLinear, nn.Linear(z_dim, n_gene))
-        self.y_var = nn.Sequential(nn.Linear(y_dim, z_dim), nonLinear, nn.Linear(z_dim, n_gene))
+        #self.n_gene = n_gene
+        self.z_dim = z_dim
+        #self.y_mu = nn.Sequential(nn.Linear(y_dim, z_dim), nonLinear, nn.Linear(z_dim, n_gene))
+        #self.y_var = nn.Sequential(nn.Linear(y_dim, z_dim), nonLinear, nn.Linear(z_dim, n_gene))
+        self.y_mu = nn.Sequential(nn.Linear(y_dim, z_dim), nonLinear, nn.Linear(z_dim, z_dim))
+        self.y_var = nn.Sequential(nn.Linear(y_dim, z_dim), nonLinear, nn.Linear(z_dim, z_dim))
 
         self.generative_pxz = torch.nn.ModuleList([
             nn.Linear(1, z_dim),
@@ -200,7 +207,8 @@ class GenerativeNet(nn.Module):
         y_mu, y_logvar = self.pzy(y)
         y_var = torch.exp(y_logvar)
         x_rec = self.pxz(z.unsqueeze(-1)).squeeze(2)
-        output = {'y_mean': y_mu.view(-1, self.n_gene), 'y_var': y_var.view(-1, self.n_gene), 'x_rec': x_rec}
+        #output = {'y_mean': y_mu.view(-1, self.n_gene), 'y_var': y_var.view(-1, self.n_gene), 'x_rec': x_rec}
+        output = {'y_mean': y_mu.view(-1, self.z_dim), 'y_var': y_var.view(-1, self.z_dim), 'x_rec': x_rec}
 
         return output
 
@@ -268,12 +276,18 @@ class MultiTaskAutoEncoder(nn.Module):
 
         nonLinear = nn.Tanh()
 
+        self.encoder = nn.Sequential(nn.Linear(self.feature_num, self.latent_dim), nonLinear)
+        
+        self.decoder = nn.Sequential(nn.Linear(self.latent_dim, self.feature_num))  # NOTE: no activation function
 
-        self.inference = InferenceNet(x_dim=1, z_dim=self.latent_dim, y_dim=5, n_gene=self.feature_num, nonLinear=nonLinear)
-        self.generative = GenerativeNet(x_dim=1, z_dim=self.latent_dim, y_dim=5, n_gene=self.feature_num, nonLinear=nonLinear)
+        self.inference = InferenceNet(x_dim=1, z_dim=self.latent_dim, y_dim=5, nonLinear=nonLinear)
 
+        self.generative = GenerativeNet(x_dim=1, z_dim=self.latent_dim, y_dim=5, nonLinear=nonLinear)
+
+        """
         self.connector = nn.Sequential(EncoderBlock(self.feature_num, 512, 0), 
                                        EncoderBlock(512, self.latent_dim, 0.2))
+        """
 
         self.predictor = nn.Sequential(EncoderBlock(self.latent_dim, 64, 0.2),
                                        nn.Linear(64, self.celltype_num),
@@ -286,21 +300,34 @@ class MultiTaskAutoEncoder(nn.Module):
                                            nn.Linear(64, 1),
                                            nn.Sigmoid()) 
 
+    def encode(self, x):
+        p1 = self.encoder(x)
+        return p1
+    
+    def decode(self, x):
+        p2 = self.decoder(x)
+        return p2
     
     def forward(self, x, alpha=1.0):
-        x_ori = x
         batch_size = x.size(0)
-        x = Variable(x.cuda()).view(batch_size, -1, 1)  # (batch_size, feature_dim) -> (batch_size, feature_dim, 1)
+        x_ori = x
+
+        # encode
+        enc_x = self.encode(x)
+        enc_x = Variable(enc_x.cuda()).view(batch_size, -1, 1)  # (batch_size, feature_dim) -> (batch_size, feature_dim, 1)
 
         # inference-generative
-        out_inf = self.inference(x)
+        out_inf = self.inference(enc_x)
         z, y = out_inf['gaussian'], out_inf['categorical']
         out_dec = self.generative(z, y)
-        rec = out_dec['x_rec']
+        enc_rec = out_dec['x_rec']
 
-        emb = self.connector(z)
-        pred = self.predictor(emb)
-        domain_emb = GradientReversalLayer.apply(emb, alpha)
+        # decode
+        rec = self.decode(enc_rec)
+
+        # predict and discriminate
+        pred = self.predictor(z)
+        domain_emb = GradientReversalLayer.apply(z, alpha)
         domain = self.discriminator(domain_emb)
 
         # calculate autoencoder loss
