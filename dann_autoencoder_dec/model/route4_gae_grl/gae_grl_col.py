@@ -339,7 +339,8 @@ class MultiTaskAutoEncoder(nn.Module):
         self.test_target_loader = Data.DataLoader(dataset=target_dataset, batch_size=batch_size, shuffle=False)
 
 
-def preprocess(trainingdatapath, source='data6k', target='sdy67', n_samples=None, n_vtop=None):
+def preprocess(trainingdatapath, source='data6k', target='sdy67', priority_genes=[],
+               n_samples=None, n_vtop=None):
     assert target in ['sdy67', 'GSE65133', 'donorA', 'donorC', 'data6k', 'data8k']
     pbmc = sc.read_h5ad(trainingdatapath)
     test = pbmc[pbmc.obs['ds']==target]
@@ -373,19 +374,27 @@ def preprocess(trainingdatapath, source='data6k', target='sdy67', n_samples=None
     if n_vtop is None:
         #### variance cut off
         label = test.X.var(axis=0) > 0.1  # FIXME: mild cut-off
+        label_idx = np.where(label)[0]
     else:
         #### top 1000 highly variable genes
-        label = np.argsort(-train.X.var(axis=0))[:n_vtop]
+        label_idx = np.argsort(-train.X.var(axis=0))[:n_vtop]
     
-    train_data = train[:, label]
+    # add priority genes
+    priority_label = np.array([True if gene in priority_genes else False for gene in train.var_names])
+    priority_idx = np.where(priority_label)[0]
+    print(f"Priority genes: {np.sum(priority_label)}/{len(priority_genes)} genes")
+    label_idx = np.unique(np.concatenate([label_idx, priority_idx]))
+    gene_names = train.var_names[label_idx]
+    
+    train_data = train[:, label_idx]
     train_data.X = np.log2(train_data.X + 1)
-    test_data = test[:, label]
+    test_data = test[:, label_idx]
     test_data.X = np.log2(test_data.X + 1)
 
     print("Train data shape: ", train_data.X.shape)
     print("Test data shape: ", test_data.X.shape)
 
-    return train_data, test_data, train_y, test_y
+    return train_data, test_data, train_y, test_y, gene_names
 
 def seed_worker(worker_id):
     worker_seed = torch.initial_seed() % 2**32
