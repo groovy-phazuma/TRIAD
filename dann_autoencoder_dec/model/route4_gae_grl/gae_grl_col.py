@@ -308,13 +308,18 @@ class MultiTaskAutoEncoder(nn.Module):
         return target_preds, ground_truth
 
     
-    def prepare_dataloader(self, source_data, target_data, batch_size):
+    def prepare_dataloader(self, source_data, target_data, batch_size, target_cells=[]):
         ### Prepare data loader for training ###
         g = torch.Generator()
         g.manual_seed(42)
 
         # Source dataset
-        source_ratios = [source_data.obs[ctype] for ctype in source_data.uns['cell_types']]
+        if len(target_cells) == 0:
+            source_ratios = [source_data.obs[ctype] for ctype in source_data.uns['cell_types']]
+            self.labels = source_data.uns['cell_types']
+        else:
+            source_ratios = [source_data.obs[ctype] for ctype in target_cells]
+            self.labels = target_cells
         self.source_data_x = source_data.X.astype(np.float32)
         self.source_data_y = np.array(source_ratios, dtype=np.float32).transpose()
         
@@ -324,7 +329,6 @@ class MultiTaskAutoEncoder(nn.Module):
         self.train_source_loader = Data.DataLoader(dataset=source_dataset, batch_size=batch_size, shuffle=True)
 
         # Extract celltype and feature info
-        self.labels = source_data.uns['cell_types']
         self.celltype_num = len(self.labels)
         self.used_features = list(source_data.var_names)
 
@@ -339,8 +343,8 @@ class MultiTaskAutoEncoder(nn.Module):
         self.test_target_loader = Data.DataLoader(dataset=target_dataset, batch_size=batch_size, shuffle=False)
 
 
-def preprocess(trainingdatapath, source='data6k', target='sdy67', priority_genes=[],
-               n_samples=None, n_vtop=None):
+def preprocess(trainingdatapath, source='data6k', target='sdy67', 
+               priority_genes=[], target_cells=['Monocytes', 'Unknown', 'CD4Tcells', 'Bcells', 'NK', 'CD8Tcells'], n_samples=None, n_vtop=None):
     assert target in ['sdy67', 'GSE65133', 'donorA', 'donorC', 'data6k', 'data8k']
     pbmc = sc.read_h5ad(trainingdatapath)
     test = pbmc[pbmc.obs['ds']==target]
@@ -367,8 +371,10 @@ def preprocess(trainingdatapath, source='data6k', target='sdy67', priority_genes
         else:
             train = pbmc[pbmc.obs['ds']==source]
 
-    train_y = train.obs.iloc[:,:-2]
-    test_y = test.obs.iloc[:,:-2]
+    train_y = train.obs[target_cells]
+    test_y = test.obs[target_cells]
+    #train_y = train.obs.iloc[:,:-2]
+    #test_y = test.obs.iloc[:,:-2]
 
     
     if n_vtop is None:
@@ -389,7 +395,11 @@ def preprocess(trainingdatapath, source='data6k', target='sdy67', priority_genes
     train_data = train[:, label_idx]
     train_data.X = np.log2(train_data.X + 1)
     test_data = test[:, label_idx]
-    test_data.X = np.log2(test_data.X + 1)
+    if target != 'GSE65133':
+        test_data.X = np.log2(test_data.X + 1)
+    else:
+        # GSE65133 is already log2 transformed
+        test_data.X = test_data.X
 
     print("Train data shape: ", train_data.X.shape)
     print("Test data shape: ", test_data.X.shape)
