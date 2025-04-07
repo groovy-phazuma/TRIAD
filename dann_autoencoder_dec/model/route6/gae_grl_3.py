@@ -4,11 +4,12 @@ Created on 2025-02-21 (Fri) 09:06:45
 
 Domain adaptation with Gradient Reversal Layer (GRL)
 
+LeakyReLU --> ReLU
+
 @author: I.Azuma
 """
 import os
 import random
-import anndata
 import numpy as np
 import pandas as pd
 from tqdm import tqdm
@@ -134,8 +135,8 @@ class EncoderBlock(nn.Module):
     def __init__(self, in_dim, out_dim, do_rates):
         super(EncoderBlock, self).__init__()
         self.layer = nn.Sequential(nn.Linear(in_dim, out_dim),
-                                   #nn.BatchNorm1d(out_dim),
-                                   nn.LeakyReLU(0.2, inplace=True),
+                                   nn.BatchNorm1d(out_dim),  # NOTE: BatchNorm1d
+                                   nn.ReLU(),
                                    nn.Dropout(p=do_rates, inplace=False))
     def forward(self, x):
         out = self.layer(x)
@@ -177,7 +178,7 @@ class MultiTaskAutoEncoder(nn.Module):
 
         self.losses = LossFunctions()
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        self.activation = torch.nn.LeakyReLU(0.05)  # NOTE: default nn.ReLU()
+        self.activation = torch.nn.ReLU()  # NOTE: default nn.ReLU()
 
         W = torch.nn.init.uniform_(torch.empty(self.d, self.d,),a=-0.1, b=0.1)
         self.w = torch.nn.Parameter(W.to(device=self.device))
@@ -213,13 +214,13 @@ class MultiTaskAutoEncoder(nn.Module):
         
         self.discriminator = nn.Sequential(nn.Linear(self.latent_dim, 64),
                                            nn.BatchNorm1d(64),
-                                           nn.LeakyReLU(0.2, inplace=True),
+                                           nn.ReLU(),
                                            nn.Dropout(p=0.2, inplace=False),
                                            nn.Linear(64, 1),
                                            nn.Sigmoid()) 
 
     
-    def forward(self, x, alpha=1.0):  # NOTE: x: (batch_size, feature_num)
+    def forward(self, x, alpha=1.0):
         batch_size = x.size(0)
 
         # 1. Encoder

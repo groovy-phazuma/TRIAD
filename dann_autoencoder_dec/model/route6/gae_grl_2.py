@@ -4,6 +4,8 @@ Created on 2025-02-21 (Fri) 09:06:45
 
 Domain adaptation with Gradient Reversal Layer (GRL)
 
+nn.BatchNorm1d(out_dim) in EncoderBlock
+
 @author: I.Azuma
 """
 import os
@@ -134,7 +136,7 @@ class EncoderBlock(nn.Module):
     def __init__(self, in_dim, out_dim, do_rates):
         super(EncoderBlock, self).__init__()
         self.layer = nn.Sequential(nn.Linear(in_dim, out_dim),
-                                   #nn.BatchNorm1d(out_dim),
+                                   nn.BatchNorm1d(out_dim),  # NOTE: BatchNorm1d
                                    nn.LeakyReLU(0.2, inplace=True),
                                    nn.Dropout(p=do_rates, inplace=False))
     def forward(self, x):
@@ -219,7 +221,7 @@ class MultiTaskAutoEncoder(nn.Module):
                                            nn.Sigmoid()) 
 
     
-    def forward(self, x, alpha=1.0):  # NOTE: x: (batch_size, feature_num)
+    def forward(self, x, alpha=1.0):
         batch_size = x.size(0)
 
         # 1. Encoder
