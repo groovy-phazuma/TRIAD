@@ -30,6 +30,7 @@ import warnings
 warnings.filterwarnings('ignore')
 
 from model.utils import *
+from model.route1_dael.dael_utils import *
 
 import sys
 BASE_DIR = '/workspace/mnt/cluster/HDD/azuma/TopicModel_Deconv'
@@ -153,6 +154,43 @@ class BaseModel(torch.nn.Module):
         torch.cuda.manual_seed_all(self.seed)
         torch.manual_seed(self.seed)
         random.seed(self.seed)
+    
+    def aug_dataloader(self, train_data, batch_size, noise=0.1, target_cells=[]):
+        """
+        Add Gaussian noise to the input tensor for data augmentation.
+        train_data: source + target
+        """
+        g = torch.Generator()
+        g.manual_seed(self.seed)
+
+        source_ds = train_data.obs['ds'].unique().tolist()
+        domain_dict = {ds: i for i, ds in enumerate(source_ds)}
+
+        aug_data, y_prop, domains = [], [], []
+        for i, ds in enumerate(source_ds):
+            data = train_data[train_data.obs['ds'] == ds]
+            x = torch.tensor(data.X).float()
+            y = torch.tensor(data.obs[target_cells].values).float()
+
+            # Add Gaussian noise to the input tensor for data augmentation
+            aug_data.append(add_noise(x, noise))
+            y_prop.append(y)
+            domains.append(torch.full((len(x),), domain_dict.get(ds), dtype=torch.long))
+
+        aug_data = torch.cat(aug_data)
+        y_prop = torch.cat(y_prop)
+        domains = torch.cat(domains)
+
+        self.data_x = aug_data
+        self.data_y = y_prop
+        self.domains = domains
+
+        # Create DataLoader
+        tr_data = torch.FloatTensor(self.data_x)
+        tr_labels = torch.FloatTensor(self.data_y)
+        dataset = Data.TensorDataset(tr_data, tr_labels)
+        self.aug_loader = Data.DataLoader(dataset=dataset, batch_size=batch_size, shuffle=True, worker_init_fn=seed_worker, generator=g)
+
 
     def mix_dataloader(self, source_data, target_data, batch_size, target_cells=[]):
         """
@@ -282,18 +320,56 @@ class GAE(BaseModel):
         return (1. - torch.eye(w_adj.shape[0], device=self.device)) * w_adj
 
 # %% main model
-class Experts(nn.Module):
-    def __init__(self, n_source, fdim, num_classes):
+class Experts_Original(nn.Module):
+    def __init__(self, n_source, fdim1, fdim2, num_classes):
         super().__init__()
         self.linears = nn.ModuleList(
-            [nn.Linear(fdim, num_classes) for _ in range(n_source)]
+            [
+                nn.Sequential(
+                    nn.Linear(fdim1, fdim2),
+                    nn.ReLU(),
+                    nn.Linear(fdim2, num_classes)
+                ) 
+                for _ in range(n_source)
+            ]
         )
-        self.softmax = nn.Softmax(dim=1)
+        self.softmax = nn.Softmax()
 
     def forward(self, i, x):
         x = self.linears[i](x)
         x = self.softmax(x)
         return x
+
+class Experts(nn.Module):
+    def __init__(self, n_source, fdim1, fdim2, num_classes):
+        super().__init__()
+        self.linears = nn.ModuleList(
+            [
+                nn.Sequential(
+                    nn.Linear(fdim1, fdim2),
+                    nn.ReLU(),
+                    nn.Linear(fdim2, num_classes)
+                )
+                for _ in range(n_source)
+            ]
+        )
+        self.softmax = nn.Softmax(dim=-1)
+
+    def forward(self, domain, x):
+        """
+        domain: (batch_size,) int tensor
+        x: (batch_size, fdim1) float tensor
+        """
+        outputs = []
+        for expert in self.linears:
+            outputs.append(expert(x))  # pass to all experts（batch_size, num_classes）
+        outputs = torch.stack(outputs, dim=1)  # (batch_size, n_source, num_classes)
+
+        domain = domain.unsqueeze(1).unsqueeze(2).expand(-1, 1, outputs.size(2))  # (batch_size, 1, num_classes)
+        out = outputs.gather(1, domain).squeeze(1)  # (batch_size, num_classes)
+
+        out = self.softmax(out)
+        return out
 
 class DAEL(nn.Module):
     """
@@ -302,140 +378,118 @@ class DAEL(nn.Module):
     """
 
     def __init__(self, option_list, seed=42):
-        super().__init__(cfg)
+        super().__init__()
         #n_domain = cfg.DATALOADER.TRAIN_X.N_DOMAIN
         #batch_size = cfg.DATALOADER.TRAIN_X.BATCH_SIZE
         n_domain = option_list['n_domain']
         batch_size = option_list['batch_size']
-        if n_domain <= 0:
-            n_domain = self.num_source_domains
+
         self.split_batch = batch_size // n_domain
         self.n_domain = n_domain
+        self.fdim1 = option_list['feature_num']
+        self.fdim2 = option_list['hidden_dim']
+        self.celltype_num = option_list['celltype_num']
 
-
-    def build_data_loader(self):
-        cfg = self.cfg
-        tfm_train = build_transform(cfg, is_train=True)
-        custom_tfm_train = [tfm_train]
-        choices = cfg.TRAINER.DAEL.STRONG_TRANSFORMS
-        tfm_train_strong = build_transform(cfg, is_train=True, choices=choices)
-        custom_tfm_train += [tfm_train_strong]
-        dm = DataManager(self.cfg, custom_tfm_train=custom_tfm_train)
-        self.train_loader_x = dm.train_loader_x
-        self.train_loader_u = dm.train_loader_u
-        self.val_loader = dm.val_loader
-        self.test_loader = dm.test_loader
-        self.num_classes = dm.num_classes
-        self.num_source_domains = dm.num_source_domains
-        self.lab2cname = dm.lab2cname
-    
-    def build_model(self):
-        cfg = self.cfg
-
-        print("Building F")
-        self.F = SimpleNet(cfg, cfg.MODEL, 0)
-        self.F.to(self.device)
-        print("# params: {:,}".format(count_num_param(self.F)))
-        self.optim_F = build_optimizer(self.F, cfg.OPTIM)
-        self.sched_F = build_lr_scheduler(self.optim_F, cfg.OPTIM)
-        self.register_model("F", self.F, self.optim_F, self.sched_F)
-        fdim = self.F.fdim
+        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
         print("Building E")
-        self.E = Experts(self.num_source_domains, fdim, self.num_classes)
+        self.E = Experts(self.n_domain, self.fdim1, self.fdim2, self.celltype_num)
         self.E.to(self.device)
-        print("# params: {:,}".format(count_num_param(self.E)))
-        self.optim_E = build_optimizer(self.E, cfg.OPTIM)
-        self.sched_E = build_lr_scheduler(self.optim_E, cfg.OPTIM)
-        self.register_model("E", self.E, self.optim_E, self.sched_E)
+    
+    def train_tmp(self, batch):
+        self.E.train()
+        loss_x_epoch, loss_cr_epoch = 0, 0 
+        for batch_idx, (feat, feat2, y_prop, domain) in enumerate(dael_loader):
+            feat = feat.cuda()
+            feat2 = feat2.cuda()
+            y_prop = y_prop.cuda()
+            domain = domain.cuda()
 
-    def forward_backward(self, batch_x, batch_u):
-        parsed_data = self.parse_batch_train(batch_x, batch_u)
-        input_x, input_x2, label_x, domain_x, input_u, input_u2 = parsed_data
+            loss_x = 0
+            loss_cr = 0
+            acc = 0
 
-        input_x = torch.split(input_x, self.split_batch, 0)
-        input_x2 = torch.split(input_x2, self.split_batch, 0)
-        label_x = torch.split(label_x, self.split_batch, 0)
-        domain_x = torch.split(domain_x, self.split_batch, 0)
-        domain_x = [d[0].item() for d in domain_x]
+            for feat_i, feat2_i, label_i, i in zip(feat, feat2, y_prop, domain):
+                cr_s = domain[domain != i]
 
-        # Generate pseudo label
-        with torch.no_grad():
-            feat_u = self.F(input_u)
-            pred_u = []
-            for k in range(self.num_source_domains):
-                pred_uk = self.E(k, feat_u)
-                pred_uk = pred_uk.unsqueeze(1)
-                pred_u.append(pred_uk)
-            pred_u = torch.cat(pred_u, 1)  # (B, K, C)
-            # Get the highest probability and index (label) for each expert
-            experts_max_p, experts_max_idx = pred_u.max(2)  # (B, K)
-            # Get the most confident expert
-            max_expert_p, max_expert_idx = experts_max_p.max(1)  # (B)
-            pseudo_label_u = []
-            for i, experts_label in zip(max_expert_idx, experts_max_idx):
-                pseudo_label_u.append(experts_label[i])
-            pseudo_label_u = torch.stack(pseudo_label_u, 0)
-            pseudo_label_u = create_onehot(pseudo_label_u, self.num_classes)
-            pseudo_label_u = pseudo_label_u.to(self.device)
-            label_u_mask = (max_expert_p >= self.conf_thre).float()
+                # Learning expert
+                pred_i = self.E(i, feat_i)  # weak aug
+                loss_x += ((label_i - pred_i) ** 2).mean()
+                expert_pred_i = pred_i.detach()
+
+                # Consistency regularization
+                cr_pred = []
+                for j in cr_s:
+                    pred_j = self.E(j, feat2_i)  # strong aug
+                    pred_j = pred_j.unsqueeze(1)
+                    cr_pred.append(pred_j)
+                cr_pred = torch.cat(cr_pred, 1)
+                cr_pred = cr_pred.mean(1)
+                loss_cr += ((cr_pred - expert_pred_i)**2).mean()
+
+            loss_x /= self.n_domain
+            loss_cr /= self.n_domain
+            loss_x_epoch += loss_x.item()
+            loss_cr_epoch += loss_cr.item()
+
+            loss = 0
+            loss += loss_x
+            loss += loss_cr
+
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+
+    def forward_backward(self, batch):
+        parsed_data = self.parse_batch_train(batch)
+        input, input2, label, domain = parsed_data
+
+        input = torch.split(input, self.split_batch, 0)
+        input2 = torch.split(input2, self.split_batch, 0)
+        label = torch.split(label, self.split_batch, 0)
+        domain = torch.split(domain, self.split_batch, 0)
+        domain = [d[0].item() for d in domain]
 
         loss_x = 0
         loss_cr = 0
-        acc_x = 0
+        acc = 0
 
-        feat_x = [self.F(x) for x in input_x]
-        feat_x2 = [self.F(x) for x in input_x2]
-        feat_u2 = self.F(input_u2)
+        feat = [self.F(x) for x in input]
+        feat2 = [self.F(x) for x in input2]
 
-        for feat_xi, feat_x2i, label_xi, i in zip(
-            feat_x, feat_x2, label_x, domain_x
-        ):
-            cr_s = [j for j in domain_x if j != i]
+        for feat_i, feat2_i, label_i, i in zip(feat, feat2, label, domain):
+            cr_s = [j for j in domain if j != i]
 
             # Learning expert
-            pred_xi = self.E(i, feat_xi)
-            loss_x += (-label_xi * torch.log(pred_xi + 1e-5)).sum(1).mean()
-            expert_label_xi = pred_xi.detach()
-            acc_x += compute_accuracy(pred_xi.detach(),
-                                      label_xi.max(1)[1])[0].item()
+            pred_i = self.E(i, feat_i)
+            loss_x += (-label_i * torch.log(pred_i + 1e-5)).sum(1).mean()
+            expert_label_i = pred_i.detach()
+            acc += compute_accuracy(pred_i.detach(),
+                                    label_i.max(1)[1])[0].item()
 
             # Consistency regularization
             cr_pred = []
             for j in cr_s:
-                pred_j = self.E(j, feat_x2i)
+                pred_j = self.E(j, feat2_i)
                 pred_j = pred_j.unsqueeze(1)
                 cr_pred.append(pred_j)
             cr_pred = torch.cat(cr_pred, 1)
             cr_pred = cr_pred.mean(1)
-            loss_cr += ((cr_pred - expert_label_xi)**2).sum(1).mean()
+            loss_cr += ((cr_pred - expert_label_i)**2).sum(1).mean()
 
         loss_x /= self.n_domain
         loss_cr /= self.n_domain
-        acc_x /= self.n_domain
-
-        # Unsupervised loss
-        pred_u = []
-        for k in range(self.num_source_domains):
-            pred_uk = self.E(k, feat_u2)
-            pred_uk = pred_uk.unsqueeze(1)
-            pred_u.append(pred_uk)
-        pred_u = torch.cat(pred_u, 1)
-        pred_u = pred_u.mean(1)
-        l_u = (-pseudo_label_u * torch.log(pred_u + 1e-5)).sum(1)
-        loss_u = (l_u * label_u_mask).mean()
+        acc /= self.n_domain
 
         loss = 0
         loss += loss_x
         loss += loss_cr
-        loss += loss_u * self.weight_u
         self.model_backward_and_update(loss)
 
         loss_summary = {
             "loss_x": loss_x.item(),
-            "acc_x": acc_x,
-            "loss_cr": loss_cr.item(),
-            "loss_u": loss_u.item(),
+            "acc": acc,
+            "loss_cr": loss_cr.item()
         }
 
         if (self.batch_idx + 1) == self.num_batches:
@@ -444,75 +498,7 @@ class DAEL(nn.Module):
         return loss_summary
 
 
-def preprocess(trainingdatapath, source='data6k', target='sdy67', 
-               priority_genes=[], target_cells=['Monocytes', 'Unknown', 'CD4Tcells', 'Bcells', 'NK', 'CD8Tcells'], n_samples=None, n_vtop=None):
-    assert target in ['sdy67', 'GSE65133', 'donorA', 'donorC', 'data6k', 'data8k']
-    pbmc = sc.read_h5ad(trainingdatapath)
-    test = pbmc[pbmc.obs['ds']==target]
-
-    if n_samples is not None:
-        np.random.seed(42)
-        idx = np.random.choice(8000, n_samples, replace=False)
-        donorA = pbmc[pbmc.obs['ds']=='donorA'][idx]
-        donorC = pbmc[pbmc.obs['ds']=='donorC'][idx]
-        data6k = pbmc[pbmc.obs['ds']=='data6k'][idx]
-        data8k = pbmc[pbmc.obs['ds']=='data8k'][idx]
-    
-    else:    
-        donorA = pbmc[pbmc.obs['ds']=='donorA']
-        donorC = pbmc[pbmc.obs['ds']=='donorC']
-        data6k = pbmc[pbmc.obs['ds']=='data6k']
-        data8k = pbmc[pbmc.obs['ds']=='data8k']
-
-    if source == 'all':
-        train = anndata.concat([donorA, donorC, data6k, data8k])
-    else:
-        if n_samples is not None:
-            train = pbmc[pbmc.obs['ds']==source][idx]
-        else:
-            train = pbmc[pbmc.obs['ds']==source]
-
-    train_y = train.obs[target_cells]
-    test_y = test.obs[target_cells]
-    
-    if n_vtop is None:
-        #### variance cut off
-        label = test.X.var(axis=0) > 0.1  # FIXME: mild cut-off
-        label_idx = np.where(label)[0]
-    else:
-        #### top 1000 highly variable genes
-        label_idx = np.argsort(-train.X.var(axis=0))[:n_vtop]
-    
-    # add priority genes
-    priority_label = np.array([True if gene in priority_genes else False for gene in train.var_names])
-    priority_idx = np.where(priority_label)[0]
-    print(f"Priority genes: {np.sum(priority_label)}/{len(priority_genes)} genes")
-    label_idx = np.unique(np.concatenate([label_idx, priority_idx]))
-    gene_names = train.var_names[label_idx]
-    
-    train_data = train[:, label_idx]
-    train_data.X = np.log2(train_data.X + 1)
-    test_data = test[:, label_idx]
-    if target != 'GSE65133':
-        test_data.X = np.log2(test_data.X + 1)
-    else:
-        # GSE65133 is already log2 transformed
-        test_data.X = test_data.X
-
-    print("Train data shape: ", train_data.X.shape)
-    print("Test data shape: ", test_data.X.shape)
-
-    return train_data, test_data, train_y, test_y, gene_names
-
 def seed_worker(worker_id):
     worker_seed = torch.initial_seed() % 2**32
     np.random.seed(worker_seed)
     random.seed(worker_seed)
-
-def set_random_seed(seed):
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
-    random.seed(seed)
-    np.random.seed(seed)
-    cudnn.deterministic = True
-    cudnn.benchmark = False
