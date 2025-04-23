@@ -502,3 +502,231 @@ def seed_worker(worker_id):
     worker_seed = torch.initial_seed() % 2**32
     np.random.seed(worker_seed)
     random.seed(worker_seed)
+
+# %% 250423_dael_workflow_solve_leak.py
+def main():
+    BASE_DIR = '/workspace/mnt/cluster/HDD/azuma/TopicModel_Deconv'
+
+    import gc
+    import wandb
+    import seaborn as sns
+    import matplotlib.pyplot as plt
+
+    from scipy import sparse
+    from collections import defaultdict
+    from sklearn.preprocessing import MinMaxScaler
+
+    import torch
+
+    import sys
+    sys.path.append(BASE_DIR+'/github/GSTMDec/mda_dec')
+    from model.route1_dael.base_dev import *
+    from model.route1_dael import dael_utils
+
+    sys.path.append(BASE_DIR+'/github/deconv-utils')
+    from src import evaluation as ev
+
+    sys.path.append(BASE_DIR+'/github/wandb-util')  
+    from wandbutil import WandbLogger
+
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+    trainingdatapath = BASE_DIR+'/datasource/scRNASeq/Scaden/pbmc_data.h5ad'
+    target_cells = ['Monocytes', 'Unknown', 'CD4Tcells', 'Bcells', 'NK', 'CD8Tcells']
+    train_data, gene_names = dael_utils.prep_daeldg(trainingdatapath, source_list=['donorA', 'donorC', 'data6k', 'data8k', 'sdy67'], n_samples=512, n_vtop=1000)
+
+    #  Collect features
+    option_list = defaultdict(list)
+
+    option_list['type_list']=target_cells
+    option_list['batch_size'] = 128
+    option_list['epochs'] = 100
+
+    option_list['feature_num'] = train_data.shape[1]
+    option_list['latent_dim'] = 256
+    option_list['hidden_dim'] = 16 
+    option_list['d'] = train_data.shape[1]
+    option_list['celltype_num'] = len(target_cells)
+    option_list['hidden_layers'] = 1
+    option_list['learning_rate'] = 1e-3
+    option_list['early_stop'] = 200
+
+    option_list['SaveResultsDir'] = BASE_DIR+"/workspace/240816_model_trial/250416_mda_deconvolution/route1_dael/results/250423_dev/"
+
+    # 1. weak augmentation
+    rec_model1 = AE(option_list,seed=42).cuda()
+    rec_model1.aug_dataloader(train_data, batch_size=rec_model1.batch_size, noise=0.1, target_cells=target_cells)
+    rec_model1.load_state_dict(torch.load(os.path.join(rec_model1.outdir, f'ae_rec_weak.pth')))
+    rec_model1.eval()
+    data_x = torch.tensor(rec_model1.data_x).cuda()
+    rec_x, feats1 = rec_model1(data_x)
+
+    # 2. strong augmentation
+    rec_model2 = AE(option_list,seed=42).cuda()
+    rec_model2.aug_dataloader(train_data, batch_size=rec_model2.batch_size, noise=1.0, target_cells=target_cells)
+    rec_model2.load_state_dict(torch.load(os.path.join(rec_model2.outdir, f'ae_rec_strong.pth')))
+    rec_model2.eval()
+    data_x = torch.tensor(rec_model2.data_x).cuda()
+    rec_x, feats2 = rec_model2(data_x)
+
+        # %% Run DAEL
+    option_dael = defaultdict(list)
+
+    option_dael['type_list']=target_cells
+    option_dael['batch_size'] = 64
+    option_dael['epochs'] = 1000
+    option_dael['pred_loss_type'] = 'custom'  # FIXME
+
+    option_dael['feature_num'] = 256  # num_features
+    option_dael['hidden_dim'] = 16 
+
+    option_dael['celltype_num'] = len(target_cells)
+    option_dael['learning_rate'] = 1e-4
+    option_dael['early_stop'] = 100
+
+    option_dael['n_domain'] = 5
+
+    # Output parameters
+    option_dael['SaveResultsDir'] = BASE_DIR+"/workspace/240816_model_trial/250416_mda_deconvolution/route1_dael/results/250423_dev/"
+
+    dael_model = DAEL(option_dael, seed=42).cuda()
+    optimizer = torch.optim.Adam(dael_model.parameters(), lr=option_dael['learning_rate'])
+
+    logger = WandbLogger(
+        entity="multi-task_deconv",  
+        project="250421_DAEL_dev",  
+        group="DAEL_Learning", 
+        name="dael_solve_leak",
+        config=option_dael,
+    )
+
+    # build dataloader
+    feats1 = feats1.cpu().detach().numpy()
+    feats2 = feats2.cpu().detach().numpy()
+    dael_loader = build_daeldg_loader(train_data, feats1, feats2, batch_size=option_dael['batch_size'], shuffle=True, target_cells=target_cells)
+
+    best_loss = 1e10
+    target_domain = [4, 5]
+    for epoch in range(option_dael['epochs']):
+        dael_model.train()
+        loss_x_epoch, loss_cr_epoch = 0, 0 
+
+        for batch_idx, (feat, feat2, y_prop, domain) in enumerate(dael_loader):
+            feat = feat.cuda()
+            feat2 = feat2.cuda()
+            y_prop = y_prop.cuda()
+            domain = domain.cuda()
+
+            # --- Expert prediction (weak augmentation) ---
+            pred = dael_model.E(domain, feat)  # (batch_size, num_classes)
+            # remove target domain and calculate loss
+            source_mask = ~torch.isin(domain, torch.tensor(target_domain, device=domain.device))
+            source_pred = pred[source_mask]  # (batch_size, num_classes)
+            source_y_prop = y_prop[source_mask]  # (batch_size, num_classes)
+
+            #loss_x = ((y_prop - pred) ** 2).mean()
+            loss_x = ((source_y_prop - source_pred) ** 2).mean()
+
+            expert_pred = pred.detach()
+
+            # --- Consistency regularization (strong augmentation) ---
+            loss_cr = 0
+            cr_preds = []
+            for j in range(dael_model.n_domain):
+                mask = (domain != j)  # (batch_size,) bool tensor
+                mask_counts = mask.sum()  # number of samples not in domain j
+                # Pass all the feat2 to the jth Expert
+                domain_j = torch.full_like(domain, j)
+                pred_j = dael_model.E(domain_j, feat2)  # (batch_size, num_classes)
+                pred_j = pred_j * mask.unsqueeze(1).float()
+                cr_preds.append(pred_j)  # use masked area
+            
+            stacked = torch.stack(cr_preds, dim=-1)  # (stacked_size, num_classes, num_domains)
+            mask = stacked != 0
+            sum_valid = (stacked * mask).sum(dim=-1)
+            count_valid = mask.sum(dim=-1)
+            assert (count_valid == dael_model.n_domain-1).all(), "Not all elements are K-1!"
+            cr_preds_m = sum_valid / (count_valid + 1e-8)  # (batch, num_classes)
+
+            # MSE
+            loss_cr = ((cr_preds_m - expert_pred) ** 2).mean()
+
+            # --- Backprop ---
+            loss = loss_x + loss_cr
+
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+
+            loss_x_epoch += loss_x.item()
+            loss_cr_epoch += loss_cr.item()
+        
+        # save best model and early stopping
+        target_loss = loss_x_epoch + loss_cr_epoch
+        if target_loss < best_loss:
+            update_flag = 0
+            best_loss = target_loss
+            torch.save(dael_model.state_dict(), os.path.join(option_dael['SaveResultsDir'], f'dael_solve_leak_best.pth'))
+        else:
+            update_flag += 1
+            if update_flag == option_dael['early_stop']:
+                print("Early stopping at epoch %d" % (epoch+1))
+                break
+
+        # logging
+        logger(
+            epoch=epoch + 1,
+            loss=loss_x_epoch + loss_cr_epoch,
+            loss_x=loss_x_epoch,
+            loss_cr=loss_cr_epoch,
+        )
+        
+        if (epoch+1) % 10 == 0:
+            print(f"Epoch {epoch}: Loss: {loss_x_epoch + loss_cr_epoch:.4f}, Loss_x: {loss_x_epoch:.4f}, Loss_cr: {loss_cr_epoch:.4f}")
+
+    # Inference
+    # 0. without augmentation
+    rec_model0 = AE(option_list,seed=42).cuda()
+    rec_model0.aug_dataloader(train_data, batch_size=rec_model0.batch_size, noise=0.0, target_cells=target_cells)
+    rec_model0.load_state_dict(torch.load(os.path.join(rec_model0.outdir, f'ae_rec_base.pth')))
+    rec_model0.eval()
+    data_x = torch.tensor(rec_model0.data_x).cuda()
+    data_y = torch.tensor(rec_model0.data_y)
+    rec_x, feats0 = rec_model1(data_x)
+    domains = rec_model0.domains.cuda()
+
+    # load dael model
+    dael_model = DAEL(option_dael, seed=42).cuda()
+    dael_model.load_state_dict(torch.load(os.path.join(option_dael['SaveResultsDir'], f'dael_solve_leak_best.pth')))
+    dael_model.eval()
+    p_k = dael_model.E(domains, feats0)
+
+    # Evaluation
+    dec_df = pd.DataFrame(p_k.cpu().detach().numpy(), columns=target_cells)
+    y_df = pd.DataFrame(data_y.cpu().detach().numpy(), columns=target_cells)
+    dec_name_list = [["Monocytes"],["Unknown"],["Bcells"],["CD4Tcells"],["CD8Tcells"],["NK"]]
+    val_name_list = [["Monocytes"],["Unknown"],["Bcells"],["CD4Tcells"],["CD8Tcells"],["NK"]]
+
+    for d in range(dael_model.n_domain):
+        # select the domain index
+        d_idx = (domains.cpu().detach().numpy() == d).nonzero()[0]
+        d_dec_df = dec_df.iloc[d_idx, :]
+        d_y_df = y_df.iloc[d_idx, :]
+
+        res = ev.eval_deconv(dec_name_list=dec_name_list, val_name_list=val_name_list, deconv_df=d_dec_df, y_df=d_y_df, do_plot=False)
+
+        # summarize
+        r_list = []
+        mae_list = []
+        ccc_list = []
+        for i in range(len(dec_name_list)):
+            tmp_res = res[i][0]
+            r, mae, ccc = tmp_res['R'], tmp_res['MAE'], tmp_res['CCC']
+            r_list.append(r)
+            mae_list.append(mae)
+            ccc_list.append(ccc)
+        summary_df = pd.DataFrame({'R':r_list, 'CCC':ccc_list, 'MAE':mae_list})
+        summary_df.index = [t[0] for t in val_name_list]
+        summary_df.loc['mean'] = summary_df.mean()
+
+        display(summary_df)
