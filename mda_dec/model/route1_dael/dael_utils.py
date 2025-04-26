@@ -152,7 +152,7 @@ def DAELdgAug(train_data):
     return data1, data2, y_prop, domains
 
 
-class DAELdgDataset(Dataset):
+class DAELdg_Labeled(Dataset):
     def __init__(self, train_data, feats1, feats2, target_cells=None):
         """
         Args:
@@ -195,11 +195,117 @@ class DAELdgDataset(Dataset):
         real_idx = self.indices[idx]
         return self.feats1[real_idx], self.feats2[real_idx], self.y_prop[idx], self.domains[idx]
 
-
 def build_daeldg_loader(train_data, feats1, feats2, batch_size=128, shuffle=True, target_cells=None):
-    daeldg_loder = DataLoader(DAELdgDataset(train_data, feats1, feats2, target_cells), batch_size=batch_size, shuffle=shuffle)
+    daeldg_loder = DataLoader(DAELdg_Labeled(train_data, feats1, feats2, target_cells), batch_size=batch_size, shuffle=shuffle)
 
     return daeldg_loder
+
+
+class DAELda_UnLabeled(Dataset):
+    def __init__(self, train_data, feats1, feats2, target_cells=None):
+        """
+        Args:
+            train_data: AnnData object
+            feats1: torch.Tensor (features after weak augmentation)
+            feats2: torch.Tensor (features after strong augmentation)
+            target_cells: list of target cell types
+        """
+        if target_cells is None:
+            target_cells = ['Monocytes', 'Unknown', 'CD4Tcells', 'Bcells', 'NK', 'CD8Tcells']
+
+        all_ds = train_data.obs['ds'].unique().tolist()
+        self.domain_dict = {ds: i for i, ds in enumerate(all_ds)}
+        self.feats1 = feats1
+        self.feats2 = feats2
+
+        train_data.obs = train_data.obs.reset_index(drop=True)
+
+        self.indices = []
+        self.domains = []
+        target_domain_counts = 0
+        for ds in all_ds:
+            data = train_data[train_data.obs['ds'] == ds]
+            idx = data.obs.index.values.tolist()  
+            y = torch.tensor(data.obs[target_cells].values).float()
+            domain = self.domain_dict[ds]
+
+            self.indices.extend(idx)
+            self.domains.extend([domain] * len(idx))
+            target_domain_counts += len(idx)
+
+        self.domains = torch.tensor(self.domains, dtype=torch.long)
+
+    def __len__(self):
+        return len(self.indices)
+
+    def __getitem__(self, idx):
+        real_idx = self.indices[idx]
+        return self.feats1[real_idx], self.feats2[real_idx], self.domains[idx]
+
+
+def build_daelda_loader(train_data, feats1, feats2, batch_size=128, 
+                        source_domains=['donorA', 'donorC', 'data6k', 'data8k'], target_domains=['sdy67'],
+                        shuffle=True, target_cells=None):
+    if target_cells is None:
+        target_cells = ['Monocytes', 'Unknown', 'CD4Tcells', 'Bcells', 'NK', 'CD8Tcells']
+    all_ds = train_data.obs['ds'].unique().tolist()
+    train_data.obs = train_data.obs.reset_index(drop=True)
+
+    # separate source and target domains
+    source_domain_indices = []
+    target_domain_indices = []
+    for ds in all_ds:
+        data = train_data[train_data.obs['ds'] == ds]
+        idx = data.obs.index.values.tolist()
+        if ds in source_domains:            
+            source_domain_indices.extend(idx)
+        elif ds in target_domains:
+            target_domain_indices.extend(idx)
+        else:
+            raise ValueError(f"Unknown domain: {ds}")
+
+    # source
+    s_data = train_data[source_domain_indices]
+    s_feats1 = feats1[source_domain_indices]
+    s_feats2 = feats2[source_domain_indices]
+
+    # target
+    t_data = train_data[target_domain_indices]
+    t_feats1 = feats1[target_domain_indices]
+    t_feats2 = feats2[target_domain_indices]
+
+    print(f"Source domain: {s_data.shape}, Target domain: {t_data.shape}")
+
+    del train_data
+
+    # build loaders
+    labeled_loder = DataLoader(DAELdg_Labeled(s_data, s_feats1, s_feats2, target_cells), 
+                                              batch_size=batch_size, shuffle=shuffle)
+    unlabeled_loder = DataLoader(DAELda_UnLabeled(t_data, t_feats1, t_feats2, target_cells),    
+                                 batch_size=batch_size, shuffle=shuffle)
+
+    return labeled_loder, unlabeled_loder
+
+def parse_batch_train(batch_x, batch_u, device):
+    # labeled data
+    input_x = batch_x[0]  # weak augmented
+    input_x2 = batch_x[1]  # strong augmented
+    prop_x = batch_x[2]
+    domain_x = batch_x[3]
+
+    # unlabeled data
+    input_u = batch_u[0]  # weak augmented
+    input_u2 = batch_u[1]  # strong augmented
+
+    # device settings
+    input_x = input_x.to(device)
+    input_x2 = input_x2.to(device)
+    prop_x = prop_x.to(device)
+    domain_x = domain_x.to(device)
+    input_u = input_u.to(device)
+    input_u2 = input_u2.to(device)
+
+    return input_x, input_x2, prop_x, domain_x, input_u, input_u2
 
 
 def add_noise(tensor: torch.Tensor, noise_std: float = 0.1) -> torch.Tensor:
@@ -220,14 +326,3 @@ def add_noise(tensor: torch.Tensor, noise_std: float = 0.1) -> torch.Tensor:
     noise = torch.randn_like(tensor) * noise_std
     augmented = tensor + noise
     return augmented
-
-
-def parse_batch_train(batch, num_classes):
-    input = batch["img"]
-    input2 = batch["img2"]
-    label = batch["label"]
-    domain = batch["domain"]
-
-    label = create_onehot(label, num_classes)
-
-    return input, input2, label, domain
