@@ -72,9 +72,9 @@ def preprocess(trainingdatapath, source='data6k', target='sdy67',
 
     return train_data, test_data, train_y, test_y, gene_names
 
-def prep_daeldg(trainingdatapath, source_list=['donorA', 'donorC', 'data6k', 'data8k', 'sdy67'], 
+def prep_daeldg(h5ad_path, source_list=['donorA', 'donorC', 'data6k', 'data8k', 'sdy67'], 
                priority_genes=[], n_samples=None, n_vtop=None):
-    pbmc = sc.read_h5ad(trainingdatapath)
+    pbmc = sc.read_h5ad(h5ad_path)
     pbmc = pbmc[pbmc.obs['ds'].isin(source_list)]
 
     # index for sample selection

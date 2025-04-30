@@ -1,0 +1,36 @@
+common:
+  target_cells: ['Monocytes', 'Unknown', 'CD4Tcells', 'Bcells', 'NK', 'CD8Tcells']
+  source_list: ['donorA', 'donorC', 'data6k', 'data8k']
+  target_list: ['sdy67']
+  n_samples: 512
+  n_vtop: 1000
+  
+rec:
+  batch_size: 128
+  epochs: 100
+  latent_dim: 256
+  learning_rate: 0.001
+  weak_noise: 0.1
+  strong_noise: 1.0
+  seed: 42
+
+dael:
+  batch_size: 64
+  epochs: 500
+  hidden_dim: 16
+  learning_rate: 0.00001
+  early_stop: 100
+  seed: 42
+  weight_u: 10
+  expert_selection: 'max'
+
+wandb:
+  entity: "multi-task_deconv"
+  project: "250425_DAEL_DA"
+  group: "DAEL_Learning"
+  name: "dael_dev"
+
+paths: 
+  h5ad_path: './datasource/scRNASeq/Scaden/pbmc_data.h5ad'  # scRNASeqデータのパス
+  rec_model_path: './workspace/240816_model_trial/250416_mda_deconvolution/route1_dael/results/250430_trainner_dev/'  # 再構成モデルの保存先
+  dael_model_path: './workspace/240816_model_trial/250416_mda_deconvolution/route1_dael/results/250430_trainner_dev/'  # DAELモデルの保存先
