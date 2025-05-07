@@ -18,7 +18,7 @@ dael:
   batch_size: 64
   epochs: 500
   hidden_dim: 16
-  learning_rate: 0.00001
+  learning_rate: 0.0001
   early_stop: 100
   seed: 42
   weight_u: 10
@@ -28,7 +28,7 @@ wandb:
   entity: "multi-task_deconv"
   project: "250425_DAEL_DA"
   group: "DAEL_Learning"
-  name: "dael_dev"
+  name: "expert_max_lr1e-4_wu=10"
 
 paths: 
   h5ad_path: './datasource/scRNASeq/Scaden/pbmc_data.h5ad'  # scRNASeqデータのパス

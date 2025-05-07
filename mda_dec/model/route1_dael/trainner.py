@@ -42,18 +42,27 @@ class SimpleTrainer():
         self.target_cells = cfg.common.target_cells
 
         self.data_preprocessing()
+        print("--- Complete Data Preprocessing ---")
         
         self.feats0, self.domains, self.data_y = self.run_rec(noise=0.0)  # without augmentation
         self.feats1, _, _ = self.run_rec(noise=0.1)  # weak augmentation
         self.feats2, _, _ = self.run_rec(noise=1.0)  # strong augmentation
+        print("--- Complete Feature Extraction ---")
+        
         self.build_data_loader()
+        print("--- Complete Build Data Loader ---")
         
     
     def data_preprocessing(self):
         cfg = self.cfg
 
+        total_list = cfg.common.source_list + cfg.common.target_list
+        self.target_indices = [total_list.index(item) for item in cfg.common.target_list]
+        print(f"Target indices: {self.target_indices}")
+
         train_data, gene_names = dael_utils.prep_daeldg(h5ad_path=cfg.paths.h5ad_path, 
-                                                        source_list=cfg.common.source_list+cfg.common.target_list, n_samples=cfg.common.n_samples, 
+                                                        source_list=total_list, 
+                                                        n_samples=cfg.common.n_samples, 
                                                         n_vtop=cfg.common.n_vtop)
         self.train_data = train_data
         self.gene_names = gene_names
@@ -84,7 +93,7 @@ class SimpleTrainer():
 
         feats1 = self.feats1.cpu().detach()
         feats2 = self.feats2.cpu().detach()
-        label_loader, unlabel_loader = dael_utils.build_daelda_loader(self.train_data, feats1, feats2, batch_size=cfg.dael.batch_size, shuffle=True, target_cells=self.target_cells)
+        label_loader, unlabel_loader = dael_utils.build_daelda_loader(self.train_data, feats1, feats2, batch_size=cfg.dael.batch_size, source_domains=cfg.common.source_list, target_domains=cfg.common.target_list, shuffle=True, target_cells=self.target_cells)
 
         self.label_loader = label_loader
         self.unlabel_loader = unlabel_loader
@@ -211,7 +220,7 @@ class SimpleTrainer():
                     break
             
             # inference
-            summary_df = self.target_inference(dael_model, self.domains, target_domain=[4,5])
+            summary_df = self.target_inference(dael_model, self.domains, target_domain=self.target_indices)
             
             # logging
             logger(
@@ -271,13 +280,34 @@ class SimpleTrainer():
 
         return summary_df
     
-    def oveall_inference(dael_model, domains, target_domain=[4,5]):
+    def overall_inference(self, domains, target_domain=[], plot_target=True):
+        cfg = self.cfg
+
+        # preparation of option list
+        option_list = defaultdict(list)
+        for key, value in vars(cfg.dael).items():
+            option_list[key] = value
+        
+        assert self.feats0.shape[1] == self.feats1.shape[1] == self.feats2.shape[1], "Feature dimension mismatch!"
+        option_list['feature_num'] = self.feats0.shape[1]
+        option_list['celltype_num'] = len(self.target_cells)
+        option_list['n_domain'] = len(cfg.common.source_list)
+
+        self.expert_selection = cfg.dael.expert_selection
+        self.weight_u = cfg.dael.weight_u
+
+        if target_domain == []:
+            target_domain = self.target_indices
         target_idx = torch.isin(domains, torch.tensor(target_domain, device=domains.device))
         s_domains = domains[~target_idx]
         t_domains = domains[target_idx]
 
-        s_feats = feats0[~target_idx,:]
-        t_feats = feats0[target_idx,:]
+        s_feats = self.feats0[~target_idx,:]
+        t_feats = self.feats0[target_idx,:]
+
+        # load best model
+        dael_model = dael_da.DAEL(option_list, seed=42).to(self.device)
+        dael_model.load_state_dict(torch.load(os.path.join(cfg.paths.dael_model_path, f'dael_da_best.pth')))
 
         # inference source
         dael_model.eval()
@@ -297,5 +327,34 @@ class SimpleTrainer():
         # concat
         p_k = torch.cat((p_k_s, p_k_t), dim=0)
 
-        return p_k
 
+        dec_df = pd.DataFrame(p_k.cpu().detach().numpy(), columns=self.target_cells)
+        y_df = pd.DataFrame(self.data_y.cpu().detach().numpy(), columns=self.target_cells)
+        dec_name_list = [["Monocytes"],["Unknown"],["Bcells"],["CD4Tcells"],["CD8Tcells"],["NK"]]
+        val_name_list = [["Monocytes"],["Unknown"],["Bcells"],["CD4Tcells"],["CD8Tcells"],["NK"]]
+
+        for d in range(dael_model.n_domain+1):
+            # select the domain index
+            d_idx = (domains.cpu().detach().numpy() == d).nonzero()[0]
+            d_dec_df = dec_df.iloc[d_idx, :]
+            d_y_df = y_df.iloc[d_idx, :]
+
+            do_plot = plot_target and d in target_domain
+            res = ev.eval_deconv(dec_name_list=dec_name_list, val_name_list=val_name_list,
+                     deconv_df=d_dec_df, y_df=d_y_df, do_plot=do_plot)
+                
+            # summarize
+            r_list = []
+            mae_list = []
+            ccc_list = []
+            for i in range(len(dec_name_list)):
+                tmp_res = res[i][0]
+                r, mae, ccc = tmp_res['R'], tmp_res['MAE'], tmp_res['CCC']
+                r_list.append(r)
+                mae_list.append(mae)
+                ccc_list.append(ccc)
+            summary_df = pd.DataFrame({'R':r_list, 'CCC':ccc_list, 'MAE':mae_list})
+            summary_df.index = [t[0] for t in val_name_list]
+            summary_df.loc['mean'] = summary_df.mean()
+
+            display(summary_df)
