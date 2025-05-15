@@ -153,16 +153,13 @@ class SimpleTrainer():
                             aug_stacked = torch.stack(aug_pool, dim=-1)  # (B, n_class, n_augmentation)
                             # calc var
                             var_mat = aug_stacked.std(dim=-1)  # (B, n_class)
-                            var_sample = var_mat.mean(dim=1)  # (B,)
+                            #var_sample = var_mat.mean(dim=1)  # (B,)
+                            var_sample = var_mat.max(dim=1).values  # (B,)
                             u_vars.append(var_sample)
                         #print(u_vars)
                         stacked = torch.stack(u_vars, dim=1)  # (B, n_domain)
-                        print(stacked.shape, stacked)
                         min_idx = stacked.min(dim=1).indices  # (B, )  e.g. [3, 1, 3, 0, 3, 3, 1, 2, 3, 1, 1, 1]
-                        print(min_idx)
-                        min_idx = min_idx.view(-1, 1)
-                        min_idx = min_idx.expand(-1, stacked.size(1))
-                        print(min_idx)
+                        pseudo_prop = dael_model.E(min_idx, feat_u)  # (batch_size, num_classes)
 
                     else:
                         u_preds = []
