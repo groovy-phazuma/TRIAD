@@ -32,7 +32,7 @@ import warnings
 warnings.filterwarnings('ignore')
 
 from model.utils import *
-from model.route1_dael.dael_utils import *
+from model.route3_dael.dael_utils import *
 
 import sys
 BASE_DIR = '/workspace/mnt/cluster/HDD/azuma/TopicModel_Deconv'
@@ -157,73 +157,41 @@ class BaseModel(torch.nn.Module):
         torch.manual_seed(self.seed)
         random.seed(self.seed)
     
-    def aug_dataloader(self, train_data, batch_size, noise=0.1, target_cells=[]):
-        """
-        Add Gaussian noise to the input tensor for data augmentation.
-        train_data: source + target
-        """
+    def multi_aug_dataloaders(self, train_data, batch_size=128, weak_noise=0.1, strong_noise=1.0, target_cells=[]):
         g = torch.Generator()
         g.manual_seed(self.seed)
 
         source_ds = train_data.obs['ds'].unique().tolist()
         domain_dict = {ds: i for i, ds in enumerate(source_ds)}
 
-        aug_data, y_prop, domains = [], [], []
+        w_aug_data, s_aug_data, y_prop, domains = [], [], [], []
         for i, ds in enumerate(source_ds):
             data = train_data[train_data.obs['ds'] == ds]
             x = torch.tensor(data.X).float()
             y = torch.tensor(data.obs[target_cells].values).float()
 
             # Add Gaussian noise to the input tensor for data augmentation
-            aug_data.append(add_noise(x, noise))
+            w_aug_data.append(add_noise(x, weak_noise))
+            s_aug_data.append(add_noise(x, strong_noise))
             y_prop.append(y)
             domains.append(torch.full((len(x),), domain_dict.get(ds), dtype=torch.long))
 
-        aug_data = torch.cat(aug_data)
+        w_aug_data = torch.cat(w_aug_data)
+        s_aug_data = torch.cat(s_aug_data)
         y_prop = torch.cat(y_prop)
         domains = torch.cat(domains)
 
-        self.data_x = aug_data
-        self.data_y = y_prop
-        self.domains = domains
-
         # Create DataLoader
-        tr_data = torch.FloatTensor(self.data_x)
-        tr_labels = torch.FloatTensor(self.data_y)
-        dataset = Data.TensorDataset(tr_data, tr_labels)
-        self.aug_loader = Data.DataLoader(dataset=dataset, batch_size=batch_size, shuffle=True, worker_init_fn=seed_worker, generator=g)
+        tr_data_w = torch.FloatTensor(w_aug_data)
+        tr_data_s = torch.FloatTensor(s_aug_data)
+        tr_labels = torch.FloatTensor(y_prop)
+        tr_domains = torch.LongTensor(domains)
+        dataset = Data.TensorDataset(tr_data_w, tr_data_s, tr_labels, tr_domains)
+        aug_loader = Data.DataLoader(dataset=dataset, batch_size=batch_size, shuffle=True, worker_init_fn=seed_worker, generator=g)
+
+        return aug_loader
 
 
-    def mix_dataloader(self, source_data, target_data, batch_size, target_cells=[]):
-        """
-        Combine source and target data for training.
-        """
-        g = torch.Generator()
-        g.manual_seed(self.seed)
-
-        # Source dataset
-        if len(target_cells) == 0:
-            source_ratios = [source_data.obs[ctype] for ctype in source_data.uns['cell_types']]
-            self.labels = source_data.uns['cell_types']
-        else:
-            source_ratios = [source_data.obs[ctype] for ctype in target_cells]
-            self.labels = target_cells
-        self.source_data_x = source_data.X.astype(np.float32)
-        self.source_data_y = np.array(source_ratios, dtype=np.float32).transpose()
-
-        # Target dataset
-        self.target_data_x = target_data.X.astype(np.float32)
-        self.target_data_y = np.random.rand(target_data.shape[0], len(self.labels))
-
-        # Combine source and target data
-        self.data_x = np.concatenate([self.source_data_x, self.target_data_x], axis=0)
-        self.data_y = np.concatenate([self.source_data_y, self.target_data_y], axis=0)
-
-        # Create DataLoader
-        tr_data = torch.FloatTensor(self.data_x)
-        tr_labels = torch.FloatTensor(self.data_y)
-        dataset = Data.TensorDataset(tr_data, tr_labels)
-        self.mix_loader = Data.DataLoader(dataset=dataset, batch_size=batch_size, shuffle=True, worker_init_fn=seed_worker, generator=g)
 
 class AE(BaseModel):
     """ Reconstruction with autoencoder (AE) model. """
@@ -263,63 +231,6 @@ class AE(BaseModel):
         rec = self.decoder(out)
         
         return rec, out
-
-class GAE(BaseModel):
-    """ Reconstruction with graph autoencoder (GAE) model. """
-    def __init__(self, option_list, seed=42):
-        super(GAE, self).__init__()
-
-        self.seed = seed
-        self.batch_size = option_list['batch_size']
-        self.feature_num = option_list['feature_num']
-        self.hidden_layers = option_list['hidden_layers']
-        self.hidden_dim = option_list['hidden_dim']
-
-        self.num_epochs = option_list['epochs']
-        self.lr = option_list['learning_rate']
-        self.early_stop = option_list['early_stop']
-        self.outdir = option_list['SaveResultsDir']
-
-        self.losses = LossFunctions()
-        self.activation = torch.nn.LeakyReLU(0.05)  # NOTE: default nn.ReLU()
-        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-
-        torch.cuda.manual_seed_all(self.seed)
-        torch.manual_seed(self.seed)
-        random.seed(self.seed)
-
-        self.encoder = MLP(input_dim=1,
-                           layers=self.hidden_layers,
-                           units=self.hidden_dim,
-                           output_dim=self.hidden_dim,
-                           activation=self.activation,
-                           device=self.device)
-        self.decoder = MLP(input_dim=self.hidden_dim,
-                           layers=self.hidden_layers,
-                           units=self.hidden_dim,
-                           output_dim=1,
-                           activation=self.activation,
-                           device=self.device)
-
-        w = torch.nn.init.uniform_(torch.empty(self.feature_num, self.feature_num),a=-0.1, b=0.1)
-        self.w = torch.nn.Parameter(w.to(device=self.device))
-
-    def forward(self, x, alpha=1.0):  # NOTE: x: (batch_size, feature_num)
-        batch_size = x.size(0)
-
-        # 1. Encoder
-        x = x.reshape((batch_size, x.size(1), 1))  # x: (batch_size, feature_num, 1)
-        out = self.encoder(x)  # out: (batch_size, feature_num, hidden_dim)
-
-        # 2. Decoder
-        self.w_adj = self._preprocess_graph(self.w)
-        out2 = torch.einsum('ijk,jl->ilk', out, self.w_adj)  # emb2: (batch_size, feature_num, hidden_dim)
-        rec = self.decoder(out2)
-        
-        return rec, out, out2
-    
-    def _preprocess_graph(self, w_adj):
-        return (1. - torch.eye(w_adj.shape[0], device=self.device)) * w_adj
 
 # %% main model
 class Experts(nn.Module):
@@ -374,10 +285,72 @@ class DAEL(nn.Module):
 
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-        print("Building E")
         self.E = Experts(self.n_domain, self.fdim1, self.fdim2, self.celltype_num)
         self.E.to(self.device)
-    
+
+class AE_DAEL(BaseModel):
+    """ Reconstruction with autoencoder (AE) model. """
+    def __init__(self, option_list, seed=42):
+        super(AE_DAEL, self).__init__()
+
+        self.weak_noise = option_list['weak_noise']
+        self.strong_noise = option_list['strong_noise']
+        self.n_domain = option_list['n_domain']
+
+        self.seed = seed
+        self.batch_size = option_list['batch_size']
+        self.feature_num = option_list['feature_num']
+        self.latent_dim = option_list['latent_dim']
+        self.hidden_dim = option_list['hidden_dim']
+        self.celltype_num = option_list['celltype_num']
+
+        self.num_epochs = option_list['epochs']
+        self.lr = option_list['learning_rate']
+        self.early_stop = option_list['early_stop']
+        self.outdir = option_list['SaveResultsDir']
+
+        self.losses = LossFunctions()
+        self.activation = torch.nn.LeakyReLU(0.05)  # NOTE: default nn.ReLU()
+        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+        torch.cuda.manual_seed_all(self.seed)
+        torch.manual_seed(self.seed)
+        random.seed(self.seed)
+
+        # AutoEncoder
+        self.encoder = nn.Sequential(
+            EncoderBlock(self.feature_num, 512, 0),
+            EncoderBlock(512, self.latent_dim, 0.2)
+        )
+        self.decoder = nn.Sequential(
+            DecoderBlock(self.latent_dim, 512, 0.2),
+            DecoderBlock(512, self.feature_num, 0)
+        )
+
+        # DAEL
+        self.E = Experts(self.n_domain, self.latent_dim, self.hidden_dim, self.celltype_num)
+        self.E.to(self.device)
+
+        self.losses = LossFunctions()
+        self.activation = torch.nn.LeakyReLU(0.05)
+
+
+    def forward(self, x, domain_label=None):
+        batch_size = x.size(0)
+
+        # Encoder
+        latent = self.encoder(x).view(batch_size, -1)
+
+        # Decoder
+        rec = self.decoder(latent)
+
+        # Predictor
+        if domain_label is not None:
+            domain_preds = self.E(domain_label, x)  # shape: (B, celltype_num)
+        else:
+            domain_preds = None
+
+        return rec, latent, domain_preds
 
 def seed_worker(worker_id):
     worker_seed = torch.initial_seed() % 2**32
