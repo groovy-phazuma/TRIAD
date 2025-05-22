@@ -1,0 +1,30 @@
+common:
+  target_cells: ['Monocytes', 'Unknown', 'CD4Tcells', 'Bcells', 'NK', 'CD8Tcells']
+  source_domain: ['data6k']  #['donorA', 'donorC', 'data6k', 'data8k']
+  target_domain: 'sdy67'
+  n_samples: 1024
+  n_vtop: 1000
+
+gaegrl:
+  batch_size: 32
+  epochs: 500
+  latent_dim: 256
+  hidden_dim: 16
+  hidden_layers: 1
+  learning_rate: 0.001
+  early_stop: 500
+  seed: 42
+  pred_loss_type: 'custom'
+  dag_w: 0.1
+  pred_w: 100
+  disc_w: 0.1
+
+wandb:
+  entity: "multi-task_deconv"
+  project: "250522_GAEGRL_route8"
+  group: "SDY67"
+  name: "sdy67_route6_reproduction"
+
+paths: 
+  h5ad_path: './datasource/scRNASeq/Scaden/pbmc_data.h5ad'  # scRNASeqデータのパス
+  gaegrl_model_path: '/workspace/mnt/cluster/HDD/azuma/TopicModel_Deconv/workspace/240816_model_trial/250521_GAE_GRL_dec/results/250522_dev/'  # GAEGRLモデルの保存先
