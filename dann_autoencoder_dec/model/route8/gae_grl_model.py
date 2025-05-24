@@ -129,7 +129,7 @@ class EncoderBlock(nn.Module):
     def __init__(self, in_dim, out_dim, do_rates):
         super(EncoderBlock, self).__init__()
         self.layer = nn.Sequential(nn.Linear(in_dim, out_dim),
-                                   #nn.BatchNorm1d(out_dim),
+                                   #nn.BatchNorm1d(out_dim),  # FIXME: default is False
                                    nn.LeakyReLU(0.2, inplace=True),
                                    nn.Dropout(p=do_rates, inplace=False))
 

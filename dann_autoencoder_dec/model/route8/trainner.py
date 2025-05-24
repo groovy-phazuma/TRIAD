@@ -95,7 +95,6 @@ class SimpleTrainer():
             option_list[key] = value
         option_list['feature_num'] = self.source_data.shape[1]
         option_list['celltype_num'] = len(self.target_cells)
-        option_list['n_domain'] = len(self.cfg.common.source_domain)
 
         self.option_list = option_list
 
@@ -141,7 +140,7 @@ class SimpleTrainer():
         l1_penalty = 0.0
         alpha, beta, rho = 0.0, 2.0, 1.0
         gamma = 0.25
-        h_thresh = 1e-4 # FIXME: default 1e-8
+        h_thresh = 1e-4  # FIXME: default 1e-8
         pre_h = np.inf
 
         for epoch in range(model.num_epochs+1):
@@ -312,9 +311,12 @@ class SimpleTrainer():
 
         return summary_df
 
-def preprocess(h5ad_path, source_list=['data6k'], target='sdy67', 
+def preprocess_stable(h5ad_path, source_list=['data6k'], target='sdy67', 
                priority_genes=[], target_cells=['Monocytes', 'Unknown', 'CD4Tcells', 'Bcells', 'NK', 'CD8Tcells'], n_samples=None, n_vtop=None, seed=42):
     assert target in ['sdy67', 'GSE65133', 'donorA', 'donorC', 'data6k', 'data8k']
+    print(f"Source domain: {source_list}")
+    print(f"Target domain: {target}")
+
     pbmc = sc.read_h5ad(h5ad_path)
     test = pbmc[pbmc.obs['ds']==target]
 
@@ -331,14 +333,20 @@ def preprocess(h5ad_path, source_list=['data6k'], target='sdy67',
         donorC = pbmc[pbmc.obs['ds']=='donorC']
         data6k = pbmc[pbmc.obs['ds']=='data6k']
         data8k = pbmc[pbmc.obs['ds']=='data8k']
-
-    if source_list == 'all':
-        train = anndata.concat([donorA, donorC, data6k, data8k])
-    else:
-        if n_samples is not None:
-            train = pbmc[pbmc.obs['ds'].isin(source_list)][idx]
+    
+    data_map = {
+        'donorA': donorA,
+        'donorC': donorC,
+        'data6k': data6k,
+        'data8k': data8k,
+    }
+    train = None
+    for s_name in source_list:
+        if s_name in data_map:
+            current_data = data_map[s_name]
+            train = current_data if train is None else anndata.concat([train, current_data])
         else:
-            train = pbmc[pbmc.obs['ds'].isin(source_list)]
+            print(f"Warning: '{s_name}' not found in data_map. Skipping.")
 
     train_y = train.obs[target_cells]
     test_y = test.obs[target_cells]
@@ -349,7 +357,7 @@ def preprocess(h5ad_path, source_list=['data6k'], target='sdy67',
         label_idx = np.where(label)[0]
     else:
         #### top 1000 highly variable genes
-        label_idx = np.argsort(-train.X.var(axis=0))[:n_vtop]
+        label_idx = np.argsort(-train.X.var(axis=0))[:n_vtop]  # FIXME: train --> test
     
     # add priority genes
     priority_label = np.array([True if gene in priority_genes else False for gene in train.var_names])
@@ -371,6 +379,117 @@ def preprocess(h5ad_path, source_list=['data6k'], target='sdy67',
     print("Test data shape: ", test_data.X.shape)
 
     return train_data, test_data, train_y, test_y, gene_names
+
+def preprocess(h5ad_path, source_list=['data6k'], target='sdy67', 
+               priority_genes=[], target_cells=['Monocytes', 'Unknown', 'CD4Tcells', 'Bcells', 'NK', 'CD8Tcells'], n_samples=None, n_vtop=None, seed=42):
+    assert target in ['sdy67', 'GSE65133', 'donorA', 'donorC', 'data6k', 'data8k']
+    print(f"Source domain: {source_list}")
+    print(f"Target domain: {target}")
+
+    pbmc = sc.read_h5ad(h5ad_path)
+    test = pbmc[pbmc.obs['ds']==target]
+
+    # calc n_vtop highly variable genes for each data
+    """
+    idx_a = calc_vtop(pbmc[pbmc.obs['ds']=='donorA'], n_vtop=n_vtop)
+    idx_c = calc_vtop(pbmc[pbmc.obs['ds']=='donorC'], n_vtop=n_vtop)
+    idx_6k = calc_vtop(pbmc[pbmc.obs['ds']=='data6k'], n_vtop=n_vtop)
+    idx_8k = calc_vtop(pbmc[pbmc.obs['ds']=='data8k'], n_vtop=n_vtop)
+    sdy67_idx = calc_vtop(pbmc[pbmc.obs['ds']=='sdy67'], n_vtop=n_vtop)
+    gse65133_idx = calc_vtop(pbmc[pbmc.obs['ds']=='GSE65133'], n_vtop=n_vtop)
+    """
+
+    if n_samples is not None:
+        np.random.seed(seed)
+        idx = np.random.choice(8000, n_samples, replace=False)
+        donorA = pbmc[pbmc.obs['ds']=='donorA'][idx]
+        donorC = pbmc[pbmc.obs['ds']=='donorC'][idx]
+        data6k = pbmc[pbmc.obs['ds']=='data6k'][idx]
+        data8k = pbmc[pbmc.obs['ds']=='data8k'][idx]
+    
+    else:    
+        donorA = pbmc[pbmc.obs['ds']=='donorA']
+        donorC = pbmc[pbmc.obs['ds']=='donorC']
+        data6k = pbmc[pbmc.obs['ds']=='data6k']
+        data8k = pbmc[pbmc.obs['ds']=='data8k']
+    
+    idx_a = calc_vtop(donorA, n_vtop=n_vtop)
+    idx_c = calc_vtop(donorC, n_vtop=n_vtop)
+    idx_6k = calc_vtop(data6k, n_vtop=n_vtop)
+    idx_8k = calc_vtop(data8k, n_vtop=n_vtop)
+    sdy67_idx = calc_vtop(pbmc[pbmc.obs['ds']=='sdy67'], n_vtop=n_vtop)
+    gse65133_idx = calc_vtop(pbmc[pbmc.obs['ds']=='GSE65133'], n_vtop=n_vtop)
+
+    
+    data_map = {
+        'donorA': (donorA, idx_a),
+        'donorC': (donorC, idx_c),
+        'data6k': (data6k, idx_6k),
+        'data8k': (data8k, idx_8k),
+    }
+    train = None
+    label_idx = np.array([], dtype=int)
+    for s_name in source_list:
+        if s_name in data_map:
+            current_data = data_map[s_name]
+            train = current_data[0] if train is None else anndata.concat([train, current_data[0]])
+            current_idx = current_data[1]
+            label_idx = np.unique(np.concatenate([label_idx, current_idx]))
+        else:
+            print(f"Warning: '{s_name}' not found in data_map. Skipping.")
+
+    train_y = train.obs[target_cells]
+    test_y = test.obs[target_cells]
+
+    if target == 'GSE65133':
+        label_idx = np.unique(np.concatenate([label_idx, gse65133_idx]))
+    elif target == 'sdy67':
+        label_idx = np.unique(np.concatenate([label_idx, sdy67_idx]))
+    else:
+        raise ValueError("Invalid target domain. Only 'GSE65133' and 'sdy67' are supported for additional variable genes.")
+
+    
+    # add priority genes
+    priority_label = np.array([True if gene in priority_genes else False for gene in train.var_names])
+    priority_idx = np.where(priority_label)[0]
+    print(f"Priority genes: {np.sum(priority_label)}/{len(priority_genes)} genes")
+    label_idx = np.unique(np.concatenate([label_idx, priority_idx]))
+    gene_names = train.var_names[label_idx]
+    
+    train_data = train[:, label_idx]
+    train_data.X = np.log2(train_data.X + 1)
+    test_data = test[:, label_idx]
+    if target != 'GSE65133':
+        test_data.X = np.log2(test_data.X + 1)
+    else:
+        # sdy67 is already log2 transformed
+        test_data.X = test_data.X
+
+    print("Train data shape: ", train_data.X.shape)
+    print("Test data shape: ", test_data.X.shape)
+
+    return train_data, test_data, train_y, test_y, gene_names
+
+def calc_vtop(train, n_vtop=1000):
+    """
+    Calculate the top n_vtop highly variable genes from the training data.
+    
+    Parameters:
+    - train: AnnData object containing the training data.
+    - n_vtop: Number of top variable genes to select.
+    
+    Returns:
+    - label_idx: Indices of the top n_vtop variable genes.
+    """
+    if n_vtop is None:
+        # variance cut off
+        label = train.X.var(axis=0) > 0.1  # FIXME: mild cut-off
+        label_idx = np.where(label)[0]
+    else:
+        # top n_vtop highly variable genes
+        label_idx = np.argsort(-train.X.var(axis=0))[:n_vtop]
+    
+    return label_idx
 
 def seed_worker(worker_id):
     worker_seed = torch.initial_seed() % 2**32
