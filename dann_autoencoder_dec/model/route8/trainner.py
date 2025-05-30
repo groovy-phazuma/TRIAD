@@ -29,11 +29,11 @@ from src import evaluation as ev
 
 
 class SimpleTrainer():
-    def __init__(self, cfg):
+    def __init__(self, cfg, seed=42):
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.cfg = cfg
         self.target_cells = cfg.common.target_cells
-        self.seed = cfg.common.seed
+        self.seed = seed
 
         self.set_data()
         self.build_dataloader(batch_size=cfg.gaegrl.batch_size)
@@ -107,7 +107,7 @@ class SimpleTrainer():
         optimizer1 = torch.optim.Adam([{'params': model.encoder.parameters()},
                                        {'params': model.decoder.parameters()},
                                        {'params': model.w}],
-                                       lr=model.lr)
+                                       lr=model.lr)  # FIXME
 
         optimizer2 = torch.optim.Adam([#{'params': model.encoder.parameters()},  # FIXME
                                       {'params': model.embedder.parameters()},
@@ -127,10 +127,9 @@ class SimpleTrainer():
             entity=self.cfg.wandb.entity,  
             project=self.cfg.wandb.project,  
             group=self.cfg.wandb.group, 
-            name=self.cfg.wandb.name,
+            name=self.cfg.wandb.name+f"_seed{self.seed}",
             config=self.option_list,
         )
-
 
         model.metric_logger = defaultdict(list) 
         best_loss = 1e10  
@@ -235,7 +234,7 @@ class SimpleTrainer():
             auc_score = roc_auc_score(all_labels, all_preds)
 
             # inference
-            summary_df = self.target_inference(model, do_plot=False)
+            summary_df, _ = self.target_inference(model, do_plot=False)
             
 
             # wandb logging
@@ -259,7 +258,7 @@ class SimpleTrainer():
                 update_flag = 0
                 best_loss = target_loss
                 model.metric_logger['best_epoch'] = epoch
-                torch.save(model.state_dict(), os.path.join(self.cfg.paths.gaegrl_model_path, f'best_model.pth'))
+                torch.save(model.state_dict(), os.path.join(self.cfg.paths.gaegrl_model_path, f'best_model_{self.seed}.pth'))
             else:
                 update_flag += 1
                 if update_flag == model.early_stop:
@@ -270,11 +269,17 @@ class SimpleTrainer():
                 print(f"Epoch:{epoch}, Loss:{loss_all:.3f}, dag:{dag_loss_epoch:.3f}, pred:{pred_loss_epoch:.3f}, disc:{disc_loss_epoch:.3f}, disc_auc:{auc_score:.3f}")
             
             gc.collect()
+        
+        # save the last model
+        model_path = os.path.join(self.cfg.paths.gaegrl_model_path, f'last_model.pth')
+        torch.save(model.state_dict(), model_path)
+
+        #scheduler2.step()
 
     def target_inference(self, model=None, do_plot=False):
         if model is None:
             # load model
-            model_path = os.path.join(self.cfg.paths.gaegrl_model_path, f'best_model.pth')
+            model_path = os.path.join(self.cfg.paths.gaegrl_model_path, f'best_model_{self.seed}.pth')
             model = MultiTaskAutoEncoder(self.option_list, seed=self.seed).cuda()
             model.load_state_dict(torch.load(model_path))
             print("Model loaded from %s" % model_path)
@@ -309,7 +314,7 @@ class SimpleTrainer():
         summary_df.index = [t[0] for t in val_name_list]
         summary_df.loc['mean'] = summary_df.mean()
 
-        return summary_df
+        return summary_df, final_preds_target
 
 def preprocess_stable(h5ad_path, source_list=['data6k'], target='sdy67', 
                priority_genes=[], target_cells=['Monocytes', 'Unknown', 'CD4Tcells', 'Bcells', 'NK', 'CD8Tcells'], n_samples=None, n_vtop=None, seed=42):
@@ -372,7 +377,7 @@ def preprocess_stable(h5ad_path, source_list=['data6k'], target='sdy67',
     if target != 'GSE65133':
         test_data.X = np.log2(test_data.X + 1)
     else:
-        # GSE65133 is already log2 transformed
+        # sdy67 is already log2 transformed
         test_data.X = test_data.X
 
     print("Train data shape: ", train_data.X.shape)
@@ -390,6 +395,7 @@ def preprocess(h5ad_path, source_list=['data6k'], target='sdy67',
     test = pbmc[pbmc.obs['ds']==target]
 
     # calc n_vtop highly variable genes for each data
+    # before sampling
     """
     idx_a = calc_vtop(pbmc[pbmc.obs['ds']=='donorA'], n_vtop=n_vtop)
     idx_c = calc_vtop(pbmc[pbmc.obs['ds']=='donorC'], n_vtop=n_vtop)
@@ -413,13 +419,15 @@ def preprocess(h5ad_path, source_list=['data6k'], target='sdy67',
         data6k = pbmc[pbmc.obs['ds']=='data6k']
         data8k = pbmc[pbmc.obs['ds']=='data8k']
     
+    # after sampling
+    #"""
     idx_a = calc_vtop(donorA, n_vtop=n_vtop)
     idx_c = calc_vtop(donorC, n_vtop=n_vtop)
     idx_6k = calc_vtop(data6k, n_vtop=n_vtop)
     idx_8k = calc_vtop(data8k, n_vtop=n_vtop)
     sdy67_idx = calc_vtop(pbmc[pbmc.obs['ds']=='sdy67'], n_vtop=n_vtop)
     gse65133_idx = calc_vtop(pbmc[pbmc.obs['ds']=='GSE65133'], n_vtop=n_vtop)
-
+    #"""
     
     data_map = {
         'donorA': (donorA, idx_a),
@@ -440,14 +448,15 @@ def preprocess(h5ad_path, source_list=['data6k'], target='sdy67',
 
     train_y = train.obs[target_cells]
     test_y = test.obs[target_cells]
-
+    
+    """
     if target == 'GSE65133':
         label_idx = np.unique(np.concatenate([label_idx, gse65133_idx]))
     elif target == 'sdy67':
         label_idx = np.unique(np.concatenate([label_idx, sdy67_idx]))
     else:
         raise ValueError("Invalid target domain. Only 'GSE65133' and 'sdy67' are supported for additional variable genes.")
-
+    """
     
     # add priority genes
     priority_label = np.array([True if gene in priority_genes else False for gene in train.var_names])
@@ -483,7 +492,7 @@ def calc_vtop(train, n_vtop=1000):
     """
     if n_vtop is None:
         # variance cut off
-        label = train.X.var(axis=0) > 0.1  # FIXME: mild cut-off
+        label = train.X.var(axis=0) > 0.1 
         label_idx = np.where(label)[0]
     else:
         # top n_vtop highly variable genes
