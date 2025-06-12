@@ -247,6 +247,26 @@ class BaseTrainer():
         }
 
         return loss_dict, curr_h
+    
+    def predict(self):
+        # load best model
+        model_path = os.path.join(self.cfg.paths.gaegrl_model_path, f'best_model_{self.seed}.pth')
+        model = MultiTaskAutoEncoder(self.option_list, seed=self.seed).cuda()
+        model.load_state_dict(torch.load(model_path))
+
+        # inference with the best model
+        model.eval()
+        preds, gt = None, None
+        for batch_idx, (x, y) in enumerate(self.test_target_loader):
+            rec, logits, domain = model(x.cuda(), alpha=1.0)
+            logits = logits.detach().cpu().numpy()
+            frac = y.detach().cpu().numpy()
+            preds = logits if preds is None else np.concatenate((preds, logits), axis=0)
+            gt = frac if gt is None else np.concatenate((gt, frac), axis=0)
+        final_preds_target = pd.DataFrame(preds, columns=self.target_cells)
+
+        return final_preds_target, gt
+
 
 class BenchmarkTrainer(BaseTrainer):
     def __init__(self, cfg, seed=42):
