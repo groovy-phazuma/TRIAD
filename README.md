@@ -1,5 +1,5 @@
-# TRIAD: Tissue-adaptive Representation via Integrated gaph Autoencoder for Deconvolution
-Tissue-adaptive Representation via Integrated gaph Autoencoder for Deconvolution
+# TRIAD: Tissue-adaptive Representation via Integrated graph Autoencoder for Deconvolution
+Tissue-adaptive Representation via Integrated graph Autoencoder for Deconvolution
 
 
 ## Publication
