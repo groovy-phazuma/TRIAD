@@ -12,18 +12,11 @@ import anndata
 import numpy as np
 import pandas as pd
 from tqdm import tqdm
-from collections import defaultdict
-from sklearn.metrics import roc_auc_score
 
 import torch
 import torch.nn as nn
-import torch.utils.data as Data
 import torch.nn.functional  as F
 import torch.backends.cudnn as cudnn
-
-from torchviz import make_dot
-from torch.utils.data import DataLoader
-from torch.utils.data.dataset import TensorDataset
 
 
 import warnings
@@ -33,7 +26,7 @@ from model.utils import *
 
 import sys
 BASE_DIR = '/workspace/mnt/cluster/HDD/azuma/TopicModel_Deconv'
-sys.path.append(BASE_DIR+'/github/GSTMDec')
+sys.path.append(BASE_DIR+'/github/TRIAD')
 from _utils import common_utils
 
 cudnn.deterministic = True
