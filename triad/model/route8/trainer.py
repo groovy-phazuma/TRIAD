@@ -17,6 +17,7 @@ import anndata
 import numpy as np
 from anndata import AnnData
 from collections import defaultdict
+from sklearn.metrics import roc_auc_score
 
 import torch
 import torch.utils.data as Data

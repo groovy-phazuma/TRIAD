@@ -16,15 +16,20 @@ import anndata
 import numpy as np
 import pandas as pd
 import scanpy as sc
+
 from anndata import AnnData
+from anndata import read_h5ad
+from sklearn.preprocessing import MinMaxScaler
+from sklearn.model_selection import train_test_split
 
 import torch
+import torch.utils.data as Data
 import torch.backends.cudnn as cudnn
 
 
 def prep4benchmark(h5ad_path, source_list=['data6k'], target='sdy67', priority_genes=[], 
                    target_cells=['Monocytes', 'Unknown', 'CD4Tcells', 'Bcells', 'NK', 'CD8Tcells'], 
-                   n_samples=None, n_vtop=None, seed=42):
+                   n_samples=None, n_vtop=None, mm_scale=False, seed=42):
     print(f"Source domain: {source_list}")
     print(f"Target domain: {target}")
 
@@ -32,14 +37,14 @@ def prep4benchmark(h5ad_path, source_list=['data6k'], target='sdy67', priority_g
     test = pbmc[pbmc.obs['ds'] == target]
 
     train, label_idx = extract_variable_sources(pbmc, source_list, n_samples=n_samples, n_vtop=n_vtop, seed=seed)
-    train_data, test_data, train_y, gene_names = finalize_data(train, test, label_idx, target_cells, priority_genes, log_conv=(target != 'GSE65133'))
+    train_data, test_data, train_y, gene_names = finalize_data(train, test, label_idx, target_cells, priority_genes, log_conv=(target != 'GSE65133'), mm_scale=mm_scale)
     test_y = test.obs[target_cells]
 
     return train_data, test_data, train_y, test_y, gene_names
 
 def prep4inference(h5ad_path, target_path, source_list=['data6k'], target='TSCA_Lung', priority_genes=[], 
              target_cells=['Monocytes', 'Unknown', 'CD4Tcells', 'Bcells', 'NK', 'CD8Tcells'], 
-             n_samples=None, n_vtop=None, target_log_conv=True, seed=42):
+             n_samples=None, n_vtop=None, target_log_conv=True, mm_scale=False, seed=42):
 
     pbmc = sc.read_h5ad(h5ad_path)
     target_df = pd.read_csv(target_path, index_col=0)
@@ -63,18 +68,17 @@ def prep4inference(h5ad_path, target_path, source_list=['data6k'], target='TSCA_
      # add obs columns from source_pbmc to target_adata
     for col in pbmc.obs.columns:
         if col not in target_adata.obs:
-            target_adata.obs[col] = 'TSCA_Lung' if col == "ds" else (2 if col == "batch" else np.nan)
+            target_adata.obs[col] = target if col == "ds" else (2 if col == "batch" else np.nan)
     
-
     combined_adata = sc.concat([pbmc, target_adata], join='inner', merge='first')
     test = combined_adata[combined_adata.obs['ds'] == target]
 
     train, label_idx = extract_variable_sources(combined_adata, source_list, n_samples=n_samples, n_vtop=n_vtop, seed=seed)
-    train_data, test_data, train_y, gene_names = finalize_data(train, test, label_idx, target_cells, priority_genes, log_conv=target_log_conv)
+    train_data, test_data, train_y, gene_names = finalize_data(train, test, label_idx, target_cells, priority_genes, log_conv=target_log_conv, mm_scale=mm_scale)
 
     return train_data, test_data, train_y, gene_names
 
-def extract_variable_sources(pbmc, source_list, n_samples=None, n_vtop=None, seed=42):
+def extract_variable_sources_legacy(pbmc, source_list, n_samples=None, n_vtop=None, seed=42):
     if n_samples is not None:
         np.random.seed(seed)
         idx = np.random.choice(8000, n_samples, replace=False)
@@ -104,7 +108,27 @@ def extract_variable_sources(pbmc, source_list, n_samples=None, n_vtop=None, see
     
     return train, label_idx
 
-def finalize_data(train, test, label_idx, target_cells, priority_genes=[], log_conv=True):
+def extract_variable_sources(pbmc, source_list, n_samples=None, n_vtop=None, seed=42):
+    # 1. Concatenate data from specified sources
+    train = None
+    for s_name in source_list:
+        data = pbmc[pbmc.obs['ds'] == s_name]
+        if n_samples is not None:
+            np.random.seed(seed)
+            idx = np.random.choice(data.shape[0], n_samples, replace=False)
+            data = data[idx]
+        train = data if train is None else anndata.concat([train, data])
+
+    # 2. Calculate highly variable genes
+    if n_vtop is None:
+        label = train.X.var(axis=0) > 0.1
+        label_idx = np.where(label)[0]
+    else:
+        label_idx = np.argsort(-train.X.var(axis=0))[:n_vtop]
+
+    return train, label_idx
+
+def finalize_data(train, test, label_idx, target_cells, priority_genes=[], log_conv=True, mm_scale=False):
     priority_label = np.array([gene in priority_genes for gene in train.var_names])
     priority_idx = np.where(priority_label)[0]
     print(f"Priority genes: {np.sum(priority_label)}/{len(priority_genes)} genes")
@@ -117,7 +141,15 @@ def finalize_data(train, test, label_idx, target_cells, priority_genes=[], log_c
 
     test_data = test[:, label_idx].copy()
     if log_conv:
+        print("Applying log2 transformation...")
         test_data.X = np.log2(test_data.X + 1)
+    
+    # min-max scaling
+    if mm_scale:
+        print("Applying Min-Max scaling...")
+        mms = MinMaxScaler()
+        train_data.X = mms.fit_transform(train_data.X.T).T
+        test_data.X = mms.fit_transform(test_data.X.T).T
 
     print("Train data shape: ", train_data.X.shape)
     print("Test data shape: ", test_data.X.shape)

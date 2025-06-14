@@ -79,7 +79,96 @@ def initialize_weight(m):
     if isinstance(m, nn.Linear):
         nn.init.xavier_uniform_(m.weight.data)
         nn.init.constant_(m.bias.data,0)
+
+def prep4scaden(h5ad_path, target='sdy67', test_ratio=0.2, target_path=None):
+    pbmc = read_h5ad(h5ad_path)
+    pbmc1 = pbmc[pbmc.obs['ds']=='sdy67']
+    microarray = pbmc[pbmc.obs['ds']=='GSE65133']
+    
+    donorA = pbmc[pbmc.obs['ds']=='donorA']
+    donorC = pbmc[pbmc.obs['ds']=='donorC']
+    data6k = pbmc[pbmc.obs['ds']=='data6k']
+    data8k = pbmc[pbmc.obs['ds']=='data8k']
+    
+    if target == 'sdy67':
+        test = pbmc1
+        train = anndata.concat([donorA,donorC,data6k,data8k])
+    elif target == 'GSE65133':
+        test = microarray
+        train = anndata.concat([donorA,donorC,data6k,data8k,pbmc1])
+    else:
+        if target_path is None:
+            raise ValueError("Please provide target_path for inference mode.")
+        print(f"Target domain: {target}")
+        target_df = pd.read_csv(target_path, index_col=0)
+
+        # Match gene names
+        target_df.index = target_df.index.str.upper()
+        target_genes = target_df.index
+        source_genes = pbmc.var_names.str.upper()
+        common_genes = target_genes.intersection(source_genes)
+        target_df_filtered = target_df.loc[common_genes]
+
+        target_adata = AnnData(X=target_df_filtered.T.values)
+        target_adata.var_names = target_df_filtered.index
+        target_adata.obs_names = target_df_filtered.columns
+        target_adata.obs['ds'] = target
+
+        print("Target data shape: ", target_adata.X.shape)
+        if len(target_adata.obs_names) == 0:
+            raise ValueError("No cells found in target data. Please check the input data.")
+
+        # add obs columns from source_pbmc to target_adata
+        for col in pbmc.obs.columns:
+            if col not in target_adata.obs:
+                target_adata.obs[col] = target if col == "ds" else (2 if col == "batch" else np.nan)
+        target_adata.obs = target_adata.obs[pbmc.obs.columns]
+
+        # train and test definition
+        gene_map = dict(zip(pbmc.var_names.str.upper(), pbmc.var_names)) 
+        ordered_genes_in_pbmc = [gene_map[gene] for gene in target_df_filtered.index if gene in gene_map]
+        source_domains = ['donorA', 'donorC', 'data6k', 'data8k']
+        train = pbmc[pbmc.obs['ds'].isin(source_domains), ordered_genes_in_pbmc]
+        test = target_adata
         
+    train_y = train.obs.iloc[:,:-2].values
+    test_y = test.obs.iloc[:,:-2].values
+
+    print(train.obs.head())
+    print(test.obs.head())
+
+    #### variance cut off
+    if target == 'sdy67':
+        label = test.X.var(axis=0) > 0.1  # NOTE: not train
+    elif target == 'GSE65133':
+        label = test.X.var(axis=0) > 0.01
+    else:
+        label = test.X.var(axis=0) > 0.1
+    test_x = np.zeros((test.X.shape[0],np.sum(label)))
+    train_x = np.zeros((train.X.shape[0],np.sum(label)))
+
+    test_x = test.X[:,label]
+    train_x = train.X[:,label]
+    
+    train_x = np.log2(train_x + 1)
+    test_x = np.log2(test_x + 1)
+    train_x, val_x, train_y, val_y = train_test_split(train_x, train_y, test_size=test_ratio)
+
+    print("Start scaling data...")
+    mms = MinMaxScaler()
+    test_x = mms.fit_transform(test_x.T)
+    test_x = test_x.T
+    train_x = mms.fit_transform(train_x.T)
+    train_x = train_x.T
+    val_x = mms.fit_transform(val_x.T)
+    val_x = val_x.T
+
+
+    print(f"Train data shape: {train_x.shape}")
+    print(f"Test data shape: {test_x.shape}")
+
+    return train_x, val_x, test_x, train_y, val_y, test_y
+
 class scaden():
     def __init__(self, cfg, architectures, traindata, seed=42):
         self.cfg = cfg
@@ -91,22 +180,41 @@ class scaden():
         self.lr = cfg.scaden.learning_rate
         self.batch_size = cfg.scaden.batch_size
         self.epochs = cfg.scaden.epochs
+        self.max_iter = cfg.scaden.max_iter
         self.inputdim = None
         self.outputdim = None
         self.seed = seed
 
         self.target_cells = cfg.common.target_cells
 
-        self.set_data()
-        self.build_dataloader(batch_size=self.batch_size)
+        set_random_seed(self.seed)
+        
+        #self.set_data_benchmark()
+        #self.build_dataloader(batch_size=self.batch_size)
+
     
-    def set_data(self):
+    def set4benchmark(self):
+        train_x, val_x, test_x, train_y, val_y, test_y = prep4scaden(h5ad_path=self.cfg.paths.h5ad_path, 
+                                                                     target=self.cfg.common.target_domain,
+                                                                     test_ratio=self.cfg.scaden.test_ratio,
+                                                                     target_path=self.cfg.paths.target_path)
+        
+        self.train_source_loader = Data.DataLoader(simdatset(train_x, train_y), batch_size=self.batch_size, shuffle=True)
+        self.val_source_loader = Data.DataLoader(simdatset(val_x, val_y), batch_size=self.batch_size, shuffle=True)
+        self.test_target_loader = Data.DataLoader(simdatset(test_x, test_y), batch_size=len(test_x), shuffle=False)
+
+        self.inputdim = self.train_source_loader.dataset.X.shape[1]
+        self.outputdim = self.train_source_loader.dataset.Y.shape[1]
+    
+    
+    def set_data_benchmark(self):
         train_data, test_data, train_y, test_y, gene_names = prep4benchmark(h5ad_path=self.cfg.paths.h5ad_path,
                                                                             source_list=self.cfg.common.source_domain,
                                                                             target=self.cfg.common.target_domain,
                                                                             target_cells=self.target_cells,
                                                                             n_samples=self.cfg.common.n_samples, 
                                                                             n_vtop=self.cfg.common.n_vtop,
+                                                                            mm_scale=self.cfg.common.mm_scale,
                                                                             seed=self.seed)
         self.source_data = train_data
         self.target_data = test_data
@@ -123,6 +231,7 @@ class scaden():
         i = 0
         loss = []
         best_loss = 1e10
+        num_iter = 0
         for i in tqdm(range(self.epochs)):
             loss_epoch = 0
             for data, label in self.train_source_loader:
@@ -134,7 +243,12 @@ class scaden():
                 optimizer.step()
                 loss_epoch += batch_loss.item()
             
-            loss.append(loss_epoch)
+                loss.append(batch_loss.item())
+
+                num_iter += 1
+                if num_iter == self.max_iter:
+                    print(f"Maximum iterations {self.max_iter} reached")
+                    return model, loss
 
             if i > self.cfg.scaden.early_stop:
                 if loss_epoch < best_loss:
@@ -146,6 +260,7 @@ class scaden():
                     if self.update_flag == self.cfg.scaden.early_stop:
                         print(f"Early stopping at epoch {i+1}")
                         return model, loss
+            
 
         return model, loss
 
@@ -343,5 +458,3 @@ class scaden():
         self.model256.load_state_dict(torch.load(model256))
         self.model512.load_state_dict(torch.load(model512))
         self.model1024.load_state_dict(torch.load(model1024))
-
-
