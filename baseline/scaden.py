@@ -170,7 +170,7 @@ def prep4scaden(h5ad_path, target='sdy67', test_ratio=0.2, target_path=None):
     return train_x, val_x, test_x, train_y, val_y, test_y
 
 class scaden():
-    def __init__(self, cfg, architectures, traindata, seed=42):
+    def __init__(self, cfg, architectures, seed=42):
         self.cfg = cfg
         self.architectures = architectures
         self.model512 = None
