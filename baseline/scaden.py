@@ -260,7 +260,6 @@ class scaden():
                     if self.update_flag == self.cfg.scaden.early_stop:
                         print(f"Early stopping at epoch {i+1}")
                         return model, loss
-            
 
         return model, loss
 
@@ -448,13 +447,14 @@ class scaden():
     def save(self):
         save_path = self.cfg.paths.save_path
         os.makedirs(save_path, exist_ok=True)
-        torch.save(self.model256.state_dict(), os.path.join(save_path, 'model256.pth'))
-        torch.save(self.model512.state_dict(), os.path.join(save_path, 'model512.pth'))
-        torch.save(self.model1024.state_dict(), os.path.join(save_path, 'model1024.pth'))
+        torch.save(self.model256.state_dict(), os.path.join(save_path, f'model256_{self.seed}.pth'))
+        torch.save(self.model512.state_dict(), os.path.join(save_path, f'model512_{self.seed}.pth'))
+        torch.save(self.model1024.state_dict(), os.path.join(save_path, f'model1024_{self.seed}.pth'))
 
 
-    def load(self, model256, model512, model1024):
+    def load(self):
         self.build_model()
-        self.model256.load_state_dict(torch.load(model256))
-        self.model512.load_state_dict(torch.load(model512))
-        self.model1024.load_state_dict(torch.load(model1024))
+        save_path = self.cfg.paths.save_path
+        self.model256.load_state_dict(torch.load(os.path.join(save_path, f'model256_{self.seed}.pth')))
+        self.model512.load_state_dict(torch.load(os.path.join(save_path, f'model512_{self.seed}.pth')))
+        self.model1024.load_state_dict(torch.load(os.path.join(save_path, f'model1024_{self.seed}.pth')))

@@ -132,23 +132,21 @@ def prep4tape(h5ad_path, target='sdy67', test_ratio=0.2, target_path=None):
     val_x = mms.fit_transform(val_x.T)
     val_x = val_x.T
 
-
     print(f"Train data shape: {train_x.shape}")
     print(f"Test data shape: {test_x.shape}")
 
     return train_x, val_x, test_x, train_y, val_y, test_y
     
 class AutoEncoder(nn.Module):
-    def __init__(self, cfg, seed=42):
+    def __init__(self, cfg, inputdim, outputdim, seed=42):
         super().__init__()
         self.name = 'ae'
         self.state = 'train' # or 'test'
         self.cfg = cfg
         self.lr  = cfg.tape.learning_rate
         self.batch_size = cfg.tape.batch_size
-        self.iterations= cfg.tape.max_iter
-        self.inputdim = None
-        self.outputdim = None
+        self.inputdim = inputdim
+        self.outputdim = outputdim
         self.seed = seed
         set_random_seed(self.seed)
     
@@ -216,7 +214,8 @@ class tape():
         self.cfg = cfg
         self.lr  = cfg.tape.learning_rate
         self.batch_size = cfg.tape.batch_size
-        self.iterations= cfg.tape.max_iter
+        self.max_iter = cfg.tape.max_iter
+        self.epochs = cfg.tape.epochs
         self.inputdim = None
         self.outputdim = None
         self.seed = seed
@@ -235,26 +234,83 @@ class tape():
         self.inputdim = self.train_source_loader.dataset.X.shape[1]
         self.outputdim = self.train_source_loader.dataset.Y.shape[1]
 
+    def training_stage(self, model, optimizer):
+        model.train()
+        model.state = 'train'
+        loss = []
+        recon_loss = []
+        best_loss = 1e10
+        num_iter = 0
+        for i in tqdm(range(self.epochs)):
+            loss_epoch = 0
+            for k, (data, label) in enumerate(self.train_source_loader):
+                data = data.to(device)
+                label = label.to(device)
+
+                optimizer.zero_grad()
+                x_recon, cell_prop, sigm = model(data)
+                batch_loss = F.l1_loss(cell_prop, label) + F.l1_loss(x_recon, data)
+                batch_loss.backward()
+                optimizer.step()
+                recon_loss.append(F.l1_loss(x_recon, data).cpu().detach().numpy())
+                l1_loss = F.l1_loss(cell_prop, label).cpu().detach().numpy()
+                loss.append(l1_loss)
+                loss_epoch += l1_loss
+
+                num_iter += 1
+                if num_iter == self.max_iter:
+                    print(f"Maximum iterations {self.max_iter} reached")
+                    return model, loss, recon_loss
+
+            if i > self.cfg.tape.early_stop:
+                if loss_epoch < best_loss:
+                    best_loss = loss_epoch
+                    self.update_flag = 0
+                    #torch.save(model.state_dict(), './model.pth')
+                else:
+                    self.update_flag += 1
+                    if self.update_flag == self.cfg.tape.early_stop:
+                        print(f"Early stopping at epoch {i+1}")
+                        return model, loss, recon_loss
+
+        return model, loss, recon_loss
+
     def train(self):
-        self.model = AutoEncoder(cfg=self.cfg).to(device)
+        self.model = AutoEncoder(cfg=self.cfg, inputdim=self.inputdim, outputdim=self.outputdim).to(device)
 
         # Train
         optimizer = Adam(self.model.parameters(), lr=self.cfg.tape.learning_rate)
-        self.model, loss, reconloss = training_stage(self.model, train_loader, optimizer, epochs=int(self.iterations /(len(train_x)/self.batch_size)), device=device, verbose=True)
+        self.model, loss, reconloss = self.training_stage(self.model, optimizer)
         print('prediction loss is:')
         showloss(loss)
         print('reconstruction loss is:')
         showloss(reconloss)
     
+    def save(self):
+        save_path = self.cfg.paths.save_path
+        os.makedirs(save_path, exist_ok=True)
+        torch.save(self.model.state_dict(), os.path.join(save_path, f'tape_{self.seed}.pth'))
+    
+    def load_model(self):
+        save_path = self.cfg.paths.save_path
+        model_path = os.path.join(save_path, f'tape_{self.seed}.pth')
+        if not os.path.exists(model_path):
+            raise FileNotFoundError(f"Model file not found: {model_path}")
+        self.model = AutoEncoder(cfg=self.cfg, inputdim=self.inputdim, outputdim=self.outputdim).to(device)
+        self.model.load_state_dict(torch.load(model_path))
+
     def predict(self):
-        self.model = train_model(train_x, train_y, seed=seed)
         self.model.eval()
         self.model.state = 'test'
+        test_x, test_y = self.test_target_loader.dataset.X, self.test_target_loader.dataset.Y
         data = torch.from_numpy(test_x).float().to(device)
-        _, pred, _ = model(data)
+        _, pred, _ = self.model(data)
         pred = pred.cpu().detach().numpy()
 
-        return pred.cpu().detach().numpy()
+        a,b = score(pred, test_y)
+        print(f"Prediction L1 error: {a}, CCC score: {b}")
+
+        return pred
 
 def L1error(pred, true):
     return np.mean(np.abs(pred - true))
@@ -296,37 +352,5 @@ def showloss(loss):
     plt.xlabel('iteration')
     plt.ylabel('loss')
     plt.show()           
-
-
-def training_stage(model, train_loader, optimizer, epochs=10):
-    model.train()
-    model.state = 'train'
-    loss = []
-    recon_loss = []
-    for i in tqdm(range(epochs)):
-        for k, (data, label) in enumerate(train_loader):
-            optimizer.zero_grad()
-            x_recon, cell_prop, sigm = model(data)
-            batch_loss = F.l1_loss(cell_prop, label) + F.l1_loss(x_recon, data)
-            batch_loss.backward()
-            optimizer.step()
-            loss.append(F.l1_loss(cell_prop, label).cpu().detach().numpy())
-            recon_loss.append(F.l1_loss(x_recon, data).cpu().detach().numpy())
-
-    return model, loss, recon_loss
-
-
-        
-def test(train_x, train_y, test_x, test_y, seed=0):
-    reproducibility(seed)
-    model = train_model(train_x, train_y, seed=seed)
-    model.eval()
-    model.state = 'test'
-    data = torch.from_numpy(test_x).float().to(device)
-    _, pred, _ = model(data)
-    pred = pred.cpu().detach().numpy()
-    a,b = score(pred,test_y)
-    print(a,b)
-    return a, b
 
 
