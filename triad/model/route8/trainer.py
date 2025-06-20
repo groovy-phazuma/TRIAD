@@ -272,6 +272,19 @@ class BaseTrainer():
         final_preds_target = pd.DataFrame(preds, columns=self.target_cells)
 
         return final_preds_target, gt
+    
+    def get_wadj(self):
+        # load best model
+        model_path = os.path.join(self.cfg.paths.gaegrl_model_path, f'best_model_{self.seed}.pth')
+        model = MultiTaskAutoEncoder(self.option_list, seed=self.seed).cuda()
+        model.load_state_dict(torch.load(model_path))
+
+        # get W_adj
+        w_adj = model.w_adj.detach().cpu().numpy()
+        gene_names = self.gene_names
+
+        w_df = pd.DataFrame(w_adj, index=gene_names, columns=gene_names)
+        return w_df
 
 
 class BenchmarkTrainer(BaseTrainer):
@@ -296,6 +309,7 @@ class BenchmarkTrainer(BaseTrainer):
         self.source_data = train_data
         self.target_data = test_data
         self.target_y = test_y
+        self.gene_names = gene_names
     
     def train_model(self):
         def inference_fn(model):
@@ -367,6 +381,7 @@ class InferenceTrainer(BaseTrainer):
                                                                     seed=self.seed)
         self.source_data = train_data
         self.target_data = test_data
+        self.gene_names = gene_names
     
     def train_model(self):
         super().train_model(inference_fn=None)
