@@ -46,15 +46,18 @@ def prep4inference(h5ad_path, target_path, source_list=['data6k'], target='TSCA_
              target_cells=['Monocytes', 'Unknown', 'CD4Tcells', 'Bcells', 'NK', 'CD8Tcells'], 
              n_samples=None, n_vtop=None, target_log_conv=True, mm_scale=False, seed=42):
 
-    pbmc = sc.read_h5ad(h5ad_path)
+    source_adata = sc.read_h5ad(h5ad_path)
     target_df = pd.read_csv(target_path, index_col=0)
 
     # Match gene names
     target_df.index = target_df.index.str.upper()
     target_genes = target_df.index
-    source_genes = pbmc.var_names.str.upper()
+    source_adata.var_names = source_adata.var_names.str.upper()
+    source_genes = source_adata.var_names
     common_genes = target_genes.intersection(source_genes)
     target_df_filtered = target_df.loc[common_genes]
+    if len(common_genes) < 100:
+        print(f"Warning: Only {len(common_genes)} common genes found between source and target datasets. This may affect model performance.")
 
     target_adata = AnnData(X=target_df_filtered.T.values)
     target_adata.var_names = target_df_filtered.index
@@ -65,12 +68,12 @@ def prep4inference(h5ad_path, target_path, source_list=['data6k'], target='TSCA_
     if len(target_adata.obs_names) == 0:
         raise ValueError("No cells found in target data. Please check the input data.")
 
-     # add obs columns from source_pbmc to target_adata
-    for col in pbmc.obs.columns:
+     # add obs columns from source_adata to target_adata
+    for col in source_adata.obs.columns:
         if col not in target_adata.obs:
             target_adata.obs[col] = target if col == "ds" else (2 if col == "batch" else np.nan)
     
-    combined_adata = sc.concat([pbmc, target_adata], join='inner', merge='first')
+    combined_adata = sc.concat([source_adata, target_adata], join='inner', merge='first')
     test = combined_adata[combined_adata.obs['ds'] == target]
 
     train, label_idx = extract_variable_sources(combined_adata, source_list, n_samples=n_samples, n_vtop=n_vtop, seed=seed)

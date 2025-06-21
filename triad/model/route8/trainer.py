@@ -378,6 +378,7 @@ class InferenceTrainer(BaseTrainer):
                                                                     target_cells=self.target_cells,
                                                                     n_samples=self.cfg.common.n_samples, 
                                                                     n_vtop=self.cfg.common.n_vtop,
+                                                                    target_log_conv=self.cfg.common.target_log_conv,
                                                                     seed=self.seed)
         self.source_data = train_data
         self.target_data = test_data
