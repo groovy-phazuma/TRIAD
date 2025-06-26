@@ -5,7 +5,7 @@ Created on 2024-09-27 (Fri) 14:17:06
 @author: I.Azuma
 """
 # %%
-BASE_DIR = '/workspace/mnt/cluster/HDD/azuma/TopicModel_Deconv'
+BASE_DIR = '/workspace/cluster/HDD/azuma/TopicModel_Deconv'
 
 import gc
 import sys
