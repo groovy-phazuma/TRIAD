@@ -193,6 +193,10 @@ class BaseTrainer:
                 print(f"Epoch:{epoch}, Loss:{loss_dict['total_loss']:.3f}, dag:{loss_dict['dag_loss']:.3f}, pred:{loss_dict['pred_loss']:.3f}, disc:{loss_dict['disc_loss']:.3f}, disc_auc:{loss_dict['disc_auc']:.3f}")
 
             gc.collect()
+        
+            # Step the schedulers
+            #scheduler1.step()
+            #scheduler2.step()
 
         torch.save(model.state_dict(), os.path.join(self.cfg.paths.gaegrl_model_path, f'last_model.pth'))
 
@@ -333,9 +337,11 @@ class BenchmarkTrainer(BaseTrainer):
             source_list=self.cfg.common.source_domain,
             target=self.cfg.common.target_domain,
             target_cells=self.target_cells,
+            priority_genes=self.cfg.common.marker_genes,
             n_samples=self.cfg.common.n_samples,
             n_vtop=self.cfg.common.n_vtop,
-            seed=self.seed
+            seed=self.seed,
+            vtop_mode=self.cfg.common.vtop_mode,
         )
         self.source_data = train_data
         self.target_data = test_data
@@ -411,11 +417,13 @@ class InferenceTrainer(BaseTrainer):
             target_path=self.cfg.paths.target_path,
             source_list=self.cfg.common.source_domain,
             target=self.cfg.common.target_domain,
+            priority_genes=self.cfg.common.marker_genes,
             target_cells=self.target_cells,
             n_samples=self.cfg.common.n_samples,
             n_vtop=self.cfg.common.n_vtop,
             target_log_conv=self.cfg.common.target_log_conv,
-            seed=self.seed
+            seed=self.seed,
+            vtop_mode=self.cfg.common.vtop_mode,
         )
         self.source_data = train_data
         self.target_data = test_data

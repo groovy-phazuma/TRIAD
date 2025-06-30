@@ -19,8 +19,8 @@ import scanpy as sc
 
 from anndata import AnnData
 from anndata import read_h5ad
+from scipy.sparse import vstack, issparse
 from sklearn.preprocessing import MinMaxScaler
-from sklearn.model_selection import train_test_split
 
 import torch
 import torch.utils.data as Data
@@ -29,14 +29,14 @@ import torch.backends.cudnn as cudnn
 
 def prep4benchmark(h5ad_path, source_list=['data6k'], target='sdy67', priority_genes=[], 
                    target_cells=['Monocytes', 'Unknown', 'CD4Tcells', 'Bcells', 'NK', 'CD8Tcells'], 
-                   n_samples=None, n_vtop=None, mm_scale=False, seed=42):
+                   n_samples=None, n_vtop=None, mm_scale=False, seed=42, vtop_mode='train'):
     print(f"Source domain: {source_list}")
     print(f"Target domain: {target}")
 
     pbmc = sc.read_h5ad(h5ad_path)
     test = pbmc[pbmc.obs['ds'] == target]
 
-    train, label_idx = extract_variable_sources(pbmc, source_list, n_samples=n_samples, n_vtop=n_vtop, seed=seed)
+    train, label_idx = extract_variable_sources(pbmc, source_list, target, n_samples=n_samples, n_vtop=n_vtop, seed=seed, vtop_mode=vtop_mode)
     train_data, test_data, train_y, gene_names = finalize_data(train, test, label_idx, target_cells, priority_genes, log_conv=(target != 'GSE65133'), mm_scale=mm_scale)
     test_y = test.obs[target_cells]
 
@@ -44,7 +44,7 @@ def prep4benchmark(h5ad_path, source_list=['data6k'], target='sdy67', priority_g
 
 def prep4inference(h5ad_path, target_path, source_list=['data6k'], target='TSCA_Lung', priority_genes=[], 
              target_cells=['Monocytes', 'Unknown', 'CD4Tcells', 'Bcells', 'NK', 'CD8Tcells'], 
-             n_samples=None, n_vtop=None, target_log_conv=True, mm_scale=False, seed=42):
+             n_samples=None, n_vtop=None, target_log_conv=True, mm_scale=False, seed=42, vtop_mode='train'):
 
     source_adata = sc.read_h5ad(h5ad_path)
     target_df = pd.read_csv(target_path, index_col=0)
@@ -76,42 +76,12 @@ def prep4inference(h5ad_path, target_path, source_list=['data6k'], target='TSCA_
     combined_adata = sc.concat([source_adata, target_adata], join='inner', merge='first')
     test = combined_adata[combined_adata.obs['ds'] == target]
 
-    train, label_idx = extract_variable_sources(combined_adata, source_list, n_samples=n_samples, n_vtop=n_vtop, seed=seed)
+    train, label_idx = extract_variable_sources(combined_adata, source_list, target, n_samples=n_samples, n_vtop=n_vtop, seed=seed, vtop_mode=vtop_mode)
     train_data, test_data, train_y, gene_names = finalize_data(train, test, label_idx, target_cells, priority_genes, log_conv=target_log_conv, mm_scale=mm_scale)
 
     return train_data, test_data, train_y, gene_names
 
-def extract_variable_sources_legacy(pbmc, source_list, n_samples=None, n_vtop=None, seed=42):
-    if n_samples is not None:
-        np.random.seed(seed)
-        idx = np.random.choice(8000, n_samples, replace=False)
-    else:
-        idx = None
-
-    def select_and_vtop(ds_name):
-        data = pbmc[pbmc.obs['ds'] == ds_name]
-        if idx is not None:
-            data = data[idx]
-        return data, calc_vtop(data, n_vtop=n_vtop)
-
-    data_map = {}
-    for ds_name in ['donorA', 'donorC', 'data6k', 'data8k']:
-        data, idx_vtop = select_and_vtop(ds_name)
-        data_map[ds_name] = (data, idx_vtop)
-
-    train = None
-    label_idx = np.array([], dtype=int)
-    for s_name in source_list:
-        if s_name in data_map:
-            current_data, current_idx = data_map[s_name]
-            train = current_data if train is None else anndata.concat([train, current_data])
-            label_idx = np.unique(np.concatenate([label_idx, current_idx]))
-        else:
-            print(f"Warning: '{s_name}' not found in data_map. Skipping.")
-    
-    return train, label_idx
-
-def extract_variable_sources(pbmc, source_list, n_samples=None, n_vtop=None, seed=42):
+def extract_variable_sources(pbmc, source_list, target, n_samples=None, n_vtop=None, seed=42, vtop_mode='train'):
     # 1. Concatenate data from specified sources
     train = None
     for s_name in source_list:
@@ -121,15 +91,65 @@ def extract_variable_sources(pbmc, source_list, n_samples=None, n_vtop=None, see
             idx = np.random.choice(data.shape[0], n_samples, replace=False)
             data = data[idx]
         train = data if train is None else anndata.concat([train, data])
+    
+    test = pbmc[pbmc.obs['ds'] == target]
 
     # 2. Calculate highly variable genes
-    if n_vtop is None:
-        label = train.X.var(axis=0) > 0.1
-        label_idx = np.where(label)[0]
+    def get_var_indices(X, top_n):
+        # Handle sparse matrix
+        if issparse(X):
+            X = X.toarray()
+        if top_n is None:
+            return np.where(X.var(axis=0) > 0.1)[0]
+        return np.argsort(-X.var(axis=0))[:top_n]
+
+    if vtop_mode == 'train':
+        label_idx = get_var_indices(train.X, n_vtop)
+
+    elif vtop_mode == 'test':
+        if test is None:
+            raise ValueError("test data must be provided when mode is 'test'")
+        label_idx = get_var_indices(test.X, n_vtop)
+
+    elif vtop_mode == 'both':
+        if test is None:
+            raise ValueError("test data must be provided when mode is 'both'")
+        train_idx = get_var_indices(train.X, n_vtop)
+        test_idx = get_var_indices(test.X, n_vtop)
+        label_idx = np.unique(np.concatenate([train_idx, test_idx]))
+
     else:
-        label_idx = np.argsort(-train.X.var(axis=0))[:n_vtop]
+        raise ValueError("mode must be one of ['train', 'test', 'both']")
 
     return train, label_idx
+
+def calc_vtop(train, test=None, n_vtop=1000, mode='train'):
+
+    if mode not in ['train', 'test', 'both']:
+        raise ValueError("mode must be one of ['train', 'test', 'both']")
+
+    if mode in ['test', 'both'] and test is None:
+        raise ValueError("test data must be provided when mode is 'test' or 'both'")
+
+    if mode == 'train':
+        X = train.X
+    elif mode == 'test':
+        X = test.X
+    elif mode == 'both':
+        X = vstack([train.X, test.X]) if issparse(train.X) else np.vstack([train.X, test.X])
+
+    # Convert sparse to dense if needed
+    if issparse(X):
+        X = X.toarray()
+
+    if n_vtop is None:
+        label = X.var(axis=0) > 0.1
+        label_idx = np.where(label)[0]
+    else:
+        label_idx = np.argsort(-X.var(axis=0))[:n_vtop]
+
+    return label_idx
+
 
 def finalize_data(train, test, label_idx, target_cells, priority_genes=[], log_conv=True, mm_scale=False):
     priority_label = np.array([gene in priority_genes for gene in train.var_names])
@@ -158,27 +178,6 @@ def finalize_data(train, test, label_idx, target_cells, priority_genes=[], log_c
     print("Test data shape: ", test_data.X.shape)
 
     return train_data, test_data, train.obs[target_cells], gene_names
-
-def calc_vtop(train, n_vtop=1000):
-    """
-    Calculate the top n_vtop highly variable genes from the training data.
-    
-    Parameters:
-    - train: AnnData object containing the training data.
-    - n_vtop: Number of top variable genes to select.
-    
-    Returns:
-    - label_idx: Indices of the top n_vtop variable genes.
-    """
-    if n_vtop is None:
-        # variance cut off
-        label = train.X.var(axis=0) > 0.1 
-        label_idx = np.where(label)[0]
-    else:
-        # top n_vtop highly variable genes
-        label_idx = np.argsort(-train.X.var(axis=0))[:n_vtop]
-    
-    return label_idx
 
 def seed_worker(worker_id):
     worker_seed = torch.initial_seed() % 2**32
