@@ -104,7 +104,7 @@ class BaseTrainer:
         Create option list for the model and initialize parameters.
         """
         option_list = defaultdict(list)
-        for key, value in vars(self.cfg.gaegrl).items():
+        for key, value in vars(self.cfg.triad).items():
             option_list[key] = value
         option_list['feature_num'] = self.source_data.shape[1]
         option_list['celltype_num'] = len(self.target_cells)
@@ -182,7 +182,7 @@ class BaseTrainer:
             if loss_dict['pred_disc_loss'] < self.best_loss:
                 self.update_flag = 0
                 self.best_loss = loss_dict['pred_disc_loss']
-                torch.save(model.state_dict(), os.path.join(self.cfg.paths.gaegrl_model_path, f'best_model_{self.seed}.pth'))
+                torch.save(model.state_dict(), os.path.join(self.cfg.paths.triad_model_path, f'best_model_{self.seed}.pth'))
             else:
                 self.update_flag += 1
                 if self.update_flag == model.early_stop:
@@ -198,7 +198,7 @@ class BaseTrainer:
             #scheduler1.step()
             #scheduler2.step()
 
-        torch.save(model.state_dict(), os.path.join(self.cfg.paths.gaegrl_model_path, f'last_model.pth'))
+        torch.save(model.state_dict(), os.path.join(self.cfg.paths.triad_model_path, f'last_model.pth'))
 
     def run_epoch(self, model, epoch, optimizer1, optimizer2, criterion_da, source_label, target_label):
         """
@@ -288,7 +288,7 @@ class BaseTrainer:
         """
         Make predictions using the trained model.
         """
-        model_path = os.path.join(self.cfg.paths.gaegrl_model_path, f'best_model_{self.seed}.pth')
+        model_path = os.path.join(self.cfg.paths.triad_model_path, f'best_model_{self.seed}.pth')
         model = TRIAD(self.option_list, seed=self.seed).cuda()
         model.load_state_dict(torch.load(model_path))
 
@@ -308,7 +308,7 @@ class BaseTrainer:
         """
         Retrieve the W_adj matrix from the trained model.
         """
-        model_path = os.path.join(self.cfg.paths.gaegrl_model_path, f'best_model_{self.seed}.pth')
+        model_path = os.path.join(self.cfg.paths.triad_model_path, f'best_model_{self.seed}.pth')
         model = TRIAD(self.option_list, seed=self.seed).cuda()
         model.load_state_dict(torch.load(model_path))
 
@@ -328,7 +328,7 @@ class BenchmarkTrainer(BaseTrainer):
         self.seed = seed
 
         self.set_data()
-        self.build_dataloader(batch_size=cfg.gaegrl.batch_size)
+        self.build_dataloader(batch_size=cfg.triad.batch_size)
         self.set_options()
 
     def set_data(self):
@@ -356,7 +356,7 @@ class BenchmarkTrainer(BaseTrainer):
 
     def target_inference(self, model=None, do_plot=False):
         if model is None:
-            model_path = os.path.join(self.cfg.paths.gaegrl_model_path, f'best_model_{self.seed}.pth')
+            model_path = os.path.join(self.cfg.paths.triad_model_path, f'best_model_{self.seed}.pth')
             model = TRIAD(self.option_list, seed=self.seed).cuda()
             model.load_state_dict(torch.load(model_path))
             print("Model loaded from %s" % model_path)
@@ -408,7 +408,7 @@ class InferenceTrainer(BaseTrainer):
         self.seed = seed
 
         self.set_data()
-        self.build_dataloader(batch_size=cfg.gaegrl.batch_size)
+        self.build_dataloader(batch_size=cfg.triad.batch_size)
         self.set_options()
 
     def set_data(self):
