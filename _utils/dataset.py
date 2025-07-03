@@ -84,12 +84,24 @@ def prep4inference(h5ad_path, target_path, source_list=['data6k'], target='TSCA_
 def extract_variable_sources(pbmc, source_list, target, n_samples=None, n_vtop=None, seed=42, vtop_mode='train'):
     # 1. Concatenate data from specified sources
     train = None
-    for s_name in source_list:
+    
+    # Calculate samples per source if n_samples is specified
+    if n_samples is not None:
+        samples_per_source = n_samples // len(source_list)
+        remainder = n_samples % len(source_list)
+    
+    for i, s_name in enumerate(source_list):
         data = pbmc[pbmc.obs['ds'] == s_name]
         if n_samples is not None:
-            np.random.seed(seed)
-            idx = np.random.choice(data.shape[0], n_samples, replace=False)
+            # Calculate number of samples for this source
+            current_n_samples = samples_per_source + (1 if i < remainder else 0)
+            
+            np.random.seed(seed + i)  # Different seed for each source to ensure reproducibility
+            idx = np.random.choice(data.shape[0], current_n_samples, replace=False)
             data = data[idx]
+            print(f"Source '{s_name}': {current_n_samples} samples selected from {pbmc[pbmc.obs['ds'] == s_name].shape[0]} available")
+        else:
+            print(f"Source '{s_name}': {data.shape[0]} samples (all available)")
         train = data if train is None else anndata.concat([train, data])
     
     test = pbmc[pbmc.obs['ds'] == target]
