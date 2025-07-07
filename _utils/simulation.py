@@ -134,15 +134,20 @@ class TSCA_Simulator(BaseSimulator):
         self.cell_idx_dict = None
     
     def assign(self):
-        if self.method == 'uniform':
+        assert self.method in ['uniform_sparse', 'uniform', 'dirichlet'], "Method not supported. Choose 'uniform_sparse', 'uniform', or 'dirichlet'."
+        if self.method == 'uniform_sparse':
             # assign uniform distribution
             im_summary = self.assign_uniform(cell_types=self.immune_cells, sparse=True)
             non_im_summary = self.assign_uniform(cell_types=self.non_immune_cells, sparse=True)
+        elif self.method == 'uniform':
+            # assign uniform distribution
+            im_summary = self.assign_uniform(cell_types=self.immune_cells, sparse=False)
+            non_im_summary = self.assign_uniform(cell_types=self.non_immune_cells, sparse=False)
         elif self.method == 'dirichlet':
             im_summary = self.assign_dirichlet(a=1.0, cell_types=self.immune_cells)
             non_im_summary = self.assign_dirichlet(a=1.0, cell_types=self.non_immune_cells)
         else:
-            raise ValueError("Method must be 'uniform' or 'dirichlet'.")
+            raise ValueError("Method not supported. Choose 'uniform_sparse', 'uniform', or 'dirichlet'.")
 
         # normalize (sum to 1)
         self.im_summary = im_summary.div(im_summary.sum(axis=1), axis=0)

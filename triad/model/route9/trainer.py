@@ -45,11 +45,11 @@ from _utils.dataset import *
 
 # Import WandB logger
 sys.path.append(BASE_DIR + '/github/wandb-util')
-from wandbutil import WandbLogger
+from wandbutil import WandbLogger  # type: ignore
 
 # Import evaluation utilities
 sys.path.append(BASE_DIR + '/github/deconv-utils')
-from src import evaluation as ev
+from src import evaluation as ev  # type: ignore
 
 class BaseTrainer:
     """
