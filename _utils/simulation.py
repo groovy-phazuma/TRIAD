@@ -121,6 +121,150 @@ class BaseSimulator():
         for target_cell in ref_df.columns:
             res = ev.eval_deconv(dec_name_list=[[target_cell]], val_name_list=[[target_cell]], deconv_df=norm_res, y_df=summary_df, do_plot=True)
 
+class GSE139107_Simulator(BaseSimulator):
+    def __init__(self, sample_size=8000, method='dirichlet'):
+        self.sample_size = sample_size
+        self.method = method
+        self.immune_cells = ['NK','T_CD4','T_CD8_CytT','Monocyte','Mast_cells']
+        self.non_immune_cells = ['Fibroblast','Ciliated','Alveolar_Type1','Alveolar_Type2']
+
+        self.summary_df = None
+        self.cell_idx_dict = None
+
+        self.filter_dict = {
+            'NK': 'NK',
+            'T_CD4': 'CD4',
+            'T_CD8_CytT':'CD8',
+            'Monocyte':'Monocyte',
+            'Mast_cells':'MAST',
+            'Fibroblast':'Fibrosis',
+            'Ciliated': 'Ciliated',
+            'Alveolar_Type1': 'AT1',
+            'Alveolar_Type2': 'AT2'
+        }
+    
+    def filter_exp(self):
+        """
+        #target_cells = ['NK']
+        #target_cells = ['Monocytes']
+        #target_cells = ['CD4+ Th', 'Naive CD4+ T', ]
+        #target_cells = ['Cytotoxic CD8+ T', 'Naive CD8+ T']
+        #target_cells = ['MAST']
+        #target_cells = ['Myofibroblasts']
+        #target_cells = ['Ciliated']
+        #target_cells = ['AT1']
+        #target_cells = ['AT2']
+        """
+        info_df = pd.read_table(BASE_DIR+'/datasource/scRNASeq/GSE131907/GSE131907_Lung_Cancer_cell_annotation.txt')
+        lung_info = info_df[info_df['Sample_Origin'].isin(['nLung', 'tLung'])]
+        cell_types = lung_info['Cell_type'].unique().tolist()
+        sub_types = sorted(lung_info['Cell_subtype'].dropna().unique().tolist())
+
+        target_cells = ['NK']
+        target_samples = lung_info[lung_info['Cell_subtype'].isin(target_cells)]['Index'].tolist()
+        input_file = BASE_DIR+'/datasource/scRNASeq/GSE131907/GSE131907_Lung_Cancer_raw_UMI_matrix.txt'
+        output_file = BASE_DIR+'/datasource/Simulated_Data/GSE139107/signature/NK_filtered_matrix.txt'
+        with open(input_file, 'r') as fin:
+            header = fin.readline().rstrip('\n').split('\t')
+            
+            # target columns ('Gene' + selected samples)
+            selected_idx = [0] + [i for i, col in enumerate(header) if col in target_samples]
+            
+            # write
+            with open(output_file, 'w') as fout:
+                fout.write('\t'.join([header[i] for i in selected_idx]) + '\n')
+                for line in fin:
+                    values = line.rstrip('\n').split('\t')
+                    selected_values = [values[i] for i in selected_idx]
+                    fout.write('\t'.join(selected_values) + '\n')
+    
+    def assign(self):
+        assert self.method in ['uniform_sparse', 'uniform', 'dirichlet'], "Method not supported. Choose 'uniform_sparse', 'uniform', or 'dirichlet'."
+        if self.method == 'uniform_sparse':
+            # assign uniform distribution
+            im_summary = self.assign_uniform(cell_types=self.immune_cells, sparse=True)
+            non_im_summary = self.assign_uniform(cell_types=self.non_immune_cells, sparse=True)
+        elif self.method == 'uniform':
+            # assign uniform distribution
+            im_summary = self.assign_uniform(cell_types=self.immune_cells, sparse=False)
+            non_im_summary = self.assign_uniform(cell_types=self.non_immune_cells, sparse=False)
+        elif self.method == 'dirichlet':
+            im_summary = self.assign_dirichlet(a=1.0, cell_types=self.immune_cells)
+            non_im_summary = self.assign_dirichlet(a=1.0, cell_types=self.non_immune_cells)
+        else:
+            raise ValueError("Method not supported. Choose 'uniform_sparse', 'uniform', or 'dirichlet'.")
+
+        # normalize (sum to 1)
+        self.im_summary = im_summary.div(im_summary.sum(axis=1), axis=0)
+        self.non_im_summary = non_im_summary.div(non_im_summary.sum(axis=1), axis=0)
+
+        summary_df = pd.concat([self.im_summary, self.non_im_summary], axis=1)
+        self.summary_df = summary_df.div(summary_df.sum(axis=1), axis=0)  # normalize to sum to 1
+    
+    def set_data(self, summary_df=None, cell_idx_dict=None):
+        if summary_df is not None:
+            self.summary_df = summary_df
+        if cell_idx_dict is not None:
+            self.cell_idx_dict = cell_idx_dict
+    
+    def split_cell_idx(self, save_dir='./data/cell_idx', train_ratio=0.7):
+        # Extract info
+        cell_types = self.immune_cells + self.non_immune_cells
+        cell_idx_dict = {}
+        for cell in cell_types:
+            cellname = self.filter_dict[cell]
+            df = pd.read_table(BASE_DIR+f'/datasource/Simulated_Data/GSE139107/signature/{cellname}_filtered_matrix.txt', index_col=0)
+            target_idx = [i for i in range(df.shape[1])]
+            cell_size = len(target_idx)
+            print("{}: {} cells are detected".format(cell, cell_size))
+            # Train / Test Split
+            random.seed(42)
+            shuffle_idx = random.sample(target_idx, cell_size)
+            train_idx = shuffle_idx[0:int(cell_size * train_ratio)]
+            test_idx = shuffle_idx[int(cell_size * train_ratio):]
+            cell_idx_dict[cell] = {'train': train_idx, 'test': test_idx}
+
+            if save_dir is not None:
+                os.makedirs(save_dir, exist_ok=True)
+            pd.to_pickle(train_idx, os.path.join(save_dir, f'{cell}_train_idx.pkl'))
+            pd.to_pickle(test_idx, os.path.join(save_dir, f'{cell}_test_idx.pkl'))
+        
+        self.cell_idx_dict = cell_idx_dict
+    
+    def create_sim_bulk(self, pool_size=500, mode='train'):
+        summary_df = self.summary_df
+        cell_idx_dict = self.cell_idx_dict
+        tototal_cells = summary_df.columns.tolist()
+
+        pooled_exp = []
+        np.random.seed(42)  # Set seed once outside the loop
+        
+        for idx in tqdm(range(len(summary_df))):
+            p_list = summary_df.iloc[idx].values  # Use .values instead of .tolist() for speed
+            for j, p in enumerate(p_list):
+                cell = tototal_cells[j]
+                tmp_size = int(pool_size * p)
+                candi_idx = cell_idx_dict[cell][mode]
+                cellname = self.filter_dict[cell]
+
+                # Use different random state for each sample to maintain reproducibility
+                rng = np.random.RandomState(42 + idx * len(tototal_cells) + j)
+                if len(candi_idx) < tmp_size:
+                    select_idx = rng.choice(candi_idx, size=tmp_size, replace=True)
+                else:
+                    select_idx = rng.choice(candi_idx, size=tmp_size, replace=False)
+                
+                df = pd.read_table(BASE_DIR+f'/datasource/Simulated_Data/GSE139107/signature/{cellname}_filtered_matrix.txt', index_col=0, usecols=[0] + select_idx)
+                tmp_sum = df.sum(axis=1).values  # sum across selected cells
+                pooled_exp.append(tmp_sum.flatten())  # Ensure 1D array
+        
+        # Convert to DataFrame more efficiently
+        pooled_exp = np.array(pooled_exp)
+        bulk_df = pd.DataFrame(pooled_exp.T)
+        bulk_df.index = df.index  # gene names
+
+        return bulk_df
+        
 
 class TSCA_Simulator(BaseSimulator):
     def __init__(self, adata=None, sample_size=8000, method='dirichlet'):
@@ -162,7 +306,7 @@ class TSCA_Simulator(BaseSimulator):
         if cell_idx_dict is not None:
             self.cell_idx_dict = cell_idx_dict
     
-    def split_cell_idx(self, info_df=None, save_dir='./data/cell_idxs'):
+    def split_cell_idx(self, info_df=None, save_dir='./data/cell_idx'):
         if info_df is None:
             # adata = sc.read_h5ad("../Tissue_Stability_Cell_Atlas/lung.cellxgene.h5ad")
             info_df = self.adata.obs
