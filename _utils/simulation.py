@@ -8,12 +8,9 @@ Created on 2024-11-27 (Wed) 21:52:13
 BASE_DIR = "/workspace/cluster/HDD/azuma/TopicModel_Deconv"
 
 import os
-import gc
 import random
 import numpy as np
 import pandas as pd
-import scanpy as sc
-import seaborn as sns
 import matplotlib.pyplot as plt
 
 from tqdm import tqdm
@@ -240,7 +237,9 @@ class GSE139107_Simulator(BaseSimulator):
         np.random.seed(42)  # Set seed once outside the loop
         
         for idx in tqdm(range(len(summary_df))):
-            p_list = summary_df.iloc[idx].values  # Use .values instead of .tolist() for speed
+            p_list = summary_df.iloc[idx].values
+            bulk_single = None
+            bulk_size = 0
             for j, p in enumerate(p_list):
                 cell = tototal_cells[j]
                 tmp_size = int(pool_size * p)
@@ -253,10 +252,32 @@ class GSE139107_Simulator(BaseSimulator):
                     select_idx = rng.choice(candi_idx, size=tmp_size, replace=True)
                 else:
                     select_idx = rng.choice(candi_idx, size=tmp_size, replace=False)
+                select_idx = [i + 1 for i in select_idx]  # Adjust index to match the file format
                 
-                df = pd.read_table(BASE_DIR+f'/datasource/Simulated_Data/GSE139107/signature/{cellname}_filtered_matrix.txt', index_col=0, usecols=[0] + select_idx)
-                tmp_sum = df.sum(axis=1).values  # sum across selected cells
-                pooled_exp.append(tmp_sum.flatten())  # Ensure 1D array
+                unique_cols = list(dict.fromkeys(select_idx))
+                df = pd.read_table(
+                    f'D:/datasource/Deconvolution/GSE131907/signature/{cellname}_filtered_matrix.txt',
+                    index_col=0,
+                    usecols=[0] + unique_cols
+                )
+                col_pos_map = {val: i for i, val in enumerate(unique_cols)}  # e.g., {2:0, 3:1, 4:2, 5:3}
+                col_map = [col_pos_map[i] for i in select_idx]               # e.g., [0,1,2,2,3]
+                bulk_size += len(col_map)
+                # repeatedly select columns based on col_map
+                df_repeated = df.iloc[:, col_map]
+                tmp_sum = df_repeated.sum(axis=1).values
+
+                if tmp_sum is None or tmp_sum.size == 0:
+                    continue
+
+                # add to bulk_single
+                if bulk_single is None:
+                    bulk_single = tmp_sum
+                else:
+                    bulk_single = bulk_single + tmp_sum
+            if bulk_single is not None:
+                pooled_exp.append(bulk_single.flatten())
+            #print(f"Sample {idx+1}/{len(summary_df)}: {bulk_size} cells pooled.")
         
         # Convert to DataFrame more efficiently
         pooled_exp = np.array(pooled_exp)
