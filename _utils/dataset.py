@@ -23,6 +23,7 @@ from scipy.sparse import vstack, issparse
 from sklearn.preprocessing import MinMaxScaler
 
 import torch
+import torch.nn as nn
 import torch.utils.data as Data
 import torch.backends.cudnn as cudnn
 
@@ -203,3 +204,8 @@ def set_random_seed(seed):
     np.random.seed(seed)
     cudnn.deterministic = True
     cudnn.benchmark = False
+
+def initialize_weight(m):
+    if isinstance(m, nn.Linear):
+        nn.init.xavier_uniform_(m.weight.data)
+        nn.init.constant_(m.bias.data,0)
