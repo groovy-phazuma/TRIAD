@@ -11,6 +11,7 @@ import os
 import random
 import numpy as np
 import pandas as pd
+import scanpy as sc
 import matplotlib.pyplot as plt
 
 from tqdm import tqdm
@@ -117,6 +118,159 @@ class BaseSimulator():
         # visualize the result
         for target_cell in ref_df.columns:
             res = ev.eval_deconv(dec_name_list=[[target_cell]], val_name_list=[[target_cell]], deconv_df=norm_res, y_df=summary_df, do_plot=True)
+        
+    def assign(self):
+        assert self.method in ['uniform_sparse', 'uniform', 'dirichlet'], "Method not supported. Choose 'uniform_sparse', 'uniform', or 'dirichlet'."
+        if self.method == 'uniform_sparse':
+            # assign uniform distribution
+            im_summary = self.assign_uniform(cell_types=self.immune_cells, sparse=True)
+            non_im_summary = self.assign_uniform(cell_types=self.non_immune_cells, sparse=True)
+        elif self.method == 'uniform':
+            # assign uniform distribution
+            im_summary = self.assign_uniform(cell_types=self.immune_cells, sparse=False)
+            non_im_summary = self.assign_uniform(cell_types=self.non_immune_cells, sparse=False)
+        elif self.method == 'dirichlet':
+            im_summary = self.assign_dirichlet(a=1.0, cell_types=self.immune_cells)
+            non_im_summary = self.assign_dirichlet(a=1.0, cell_types=self.non_immune_cells)
+        else:
+            raise ValueError("Method not supported. Choose 'uniform_sparse', 'uniform', or 'dirichlet'.")
+
+        # normalize (sum to 1)
+        self.im_summary = im_summary.div(im_summary.sum(axis=1), axis=0)
+        self.non_im_summary = non_im_summary.div(non_im_summary.sum(axis=1), axis=0)
+
+        summary_df = pd.concat([self.im_summary, self.non_im_summary], axis=1)
+        self.summary_df = summary_df.div(summary_df.sum(axis=1), axis=0)  # normalize to sum to 1
+    
+    def set_data(self, summary_df=None, cell_idx_dict=None, adata=None):
+        if summary_df is not None:
+            self.summary_df = summary_df
+        if cell_idx_dict is not None:
+            self.cell_idx_dict = cell_idx_dict
+        if adata is not None:
+            self.adata = adata
+
+class LiverCellAtlas_Simulator(BaseSimulator):
+    def __init__(self, sample_size=8000, method='dirichlet'):
+        self.sample_size = sample_size
+        self.method = method
+        #self.immune_cells = ['Neutrophils', 'Monocytes', 'Kupffer', 'NK', 'T', 'B', 'pDCs', 'cDC1s', 'cDC2s']
+        #self.non_immune_cells = ['Hepatocytes', 'Cholangiocytes', 'Fibroblasts']
+        self.immune_cells = ['Neutrophils', 'Monocytes & Monocyte-derived cells', 'Kupffer cells', 'NK cells', 'T cells', 'B cells', 'pDCs', 'cDC1s', 'cDC2s']
+        self.non_immune_cells = ['Hepatocytes', 'Cholangiocytes', 'Fibroblasts']
+
+        self.summary_df = None
+        self.cell_idx_dict = None
+
+        self.filter_dict = {
+            'Neutrophils': 'Neutrophils',
+            'Monocytes & Monocyte-derived cells': 'Monocytes',
+            'Kupffer cells': 'Kupffer',
+            'NK cells': 'NK',
+            'T cells': 'T',
+            'B cells': 'B',
+            'pDCs': 'pDCs',
+            'cDC1s': 'cDC1s',
+            'cDC2s': 'cDC2s',
+            'Hepatocytes': 'Hepatocytes',
+            'Cholangiocytes': 'Cholangiocytes',
+            'Fibroblasts': 'Fibroblasts'
+        }
+    
+    def split_cell_idx(self, save_dir='./data/cell_idx', train_ratio=0.7):
+        # Extract info
+        cell_types = self.immune_cells + self.non_immune_cells
+        cell_idx_dict = {}
+        for cell in cell_types:
+            cellname = self.filter_dict[cell]
+            #df = pd.read_table(BASE_DIR+f'/datasource/Simulated_Data/LiverCellAtlas/signature/{cell}_cell_counts.txt', index_col=0)
+            mat = self.adata[self.adata.obs['cell_type'] == cell, :].copy().X.toarray().T
+
+            target_idx = [i for i in range(mat.shape[1])]
+            cell_size = len(target_idx)
+            print("{}: {} cells are detected".format(cell, cell_size))
+            # Train / Test Split
+            random.seed(42)
+            shuffle_idx = random.sample(target_idx, cell_size)
+            train_idx = shuffle_idx[0:int(cell_size * train_ratio)]
+            test_idx = shuffle_idx[int(cell_size * train_ratio):]
+            cell_idx_dict[cell] = {'train': train_idx, 'test': test_idx}
+
+            if save_dir is not None:
+                os.makedirs(save_dir, exist_ok=True)
+            pd.to_pickle(train_idx, os.path.join(save_dir, f'{cellname}_train_idx.pkl'))
+            pd.to_pickle(test_idx, os.path.join(save_dir, f'{cellname}_test_idx.pkl'))
+        
+        self.cell_idx_dict = cell_idx_dict
+    
+    def create_sim_bulk(self, pool_size=500, mode='train'):
+        summary_df = self.summary_df
+        cell_idx_dict = self.cell_idx_dict
+        tototal_cells = summary_df.columns.tolist()
+
+        adata = sc.read_h5ad(BASE_DIR+'/datasource/scRNASeq/LiverCellAtlas/mouseStStAll/processed/liver_adata_148202x19052.h5ad')
+
+        pooled_exp = []
+        np.random.seed(42)  # Set seed once outside the loop
+
+        reverse_dict = {v: k for k, v in self.filter_dict.items()}  # Reverse the dictionary for easier access
+        
+        for idx in tqdm(range(len(summary_df))):
+            p_list = summary_df.iloc[idx].values
+            bulk_single = None
+            bulk_size = 0
+            for j, p in enumerate(p_list):
+                cell = tototal_cells[j]
+                cellname = reverse_dict[cell]
+                tmp_size = int(pool_size * p)
+                candi_idx = cell_idx_dict[cellname][mode]
+
+                # Use different random state for each sample to maintain reproducibility
+                rng = np.random.RandomState(42 + idx * len(tototal_cells) + j)
+                if len(candi_idx) < tmp_size:
+                    select_idx = rng.choice(candi_idx, size=tmp_size, replace=True)
+                else:
+                    select_idx = rng.choice(candi_idx, size=tmp_size, replace=False)
+                select_idx = [i for i in select_idx]  # Adjust index to match the file format
+                
+                unique_cols = list(dict.fromkeys(select_idx))
+
+                """
+                df = pd.read_table(
+                    BASE_DIR+f'/datasource/Simulated_Data/LiverCellAtlas/signature/{cell}_cell_counts.txt',
+                    index_col=0,
+                    usecols=[0] + unique_cols
+                )
+                """
+                tmp_adata = adata[adata.obs['cell_type'] == cellname, :].copy()
+                #print(tmp_adata.shape, cellname, unique_cols)
+                df = tmp_adata[unique_cols, :].to_df().T  # Use AnnData to get the expression matrix
+                col_pos_map = {val: i for i, val in enumerate(unique_cols)}  # e.g., {2:0, 3:1, 4:2, 5:3}
+                col_map = [col_pos_map[i] for i in select_idx]               # e.g., [0,1,2,2,3]
+                bulk_size += len(col_map)
+                # repeatedly select columns based on col_map
+                df_repeated = df.iloc[:, col_map]
+                tmp_sum = df_repeated.sum(axis=1).values
+
+                if tmp_sum is None or tmp_sum.size == 0:
+                    continue
+
+                # add to bulk_single
+                if bulk_single is None:
+                    bulk_single = tmp_sum
+                else:
+                    bulk_single = bulk_single + tmp_sum
+            if bulk_single is not None:
+                pooled_exp.append(bulk_single.flatten())
+            #print(f"Sample {idx+1}/{len(summary_df)}: {bulk_size} cells pooled.")
+        
+        # Convert to DataFrame more efficiently
+        pooled_exp = np.array(pooled_exp)
+        bulk_df = pd.DataFrame(pooled_exp.T)
+        bulk_df.index = df.index  # gene names
+
+        return bulk_df
+
 
 class GSE139107_Simulator(BaseSimulator):
     def __init__(self, sample_size=8000, method='dirichlet'):
@@ -174,35 +328,6 @@ class GSE139107_Simulator(BaseSimulator):
                     values = line.rstrip('\n').split('\t')
                     selected_values = [values[i] for i in selected_idx]
                     fout.write('\t'.join(selected_values) + '\n')
-    
-    def assign(self):
-        assert self.method in ['uniform_sparse', 'uniform', 'dirichlet'], "Method not supported. Choose 'uniform_sparse', 'uniform', or 'dirichlet'."
-        if self.method == 'uniform_sparse':
-            # assign uniform distribution
-            im_summary = self.assign_uniform(cell_types=self.immune_cells, sparse=True)
-            non_im_summary = self.assign_uniform(cell_types=self.non_immune_cells, sparse=True)
-        elif self.method == 'uniform':
-            # assign uniform distribution
-            im_summary = self.assign_uniform(cell_types=self.immune_cells, sparse=False)
-            non_im_summary = self.assign_uniform(cell_types=self.non_immune_cells, sparse=False)
-        elif self.method == 'dirichlet':
-            im_summary = self.assign_dirichlet(a=1.0, cell_types=self.immune_cells)
-            non_im_summary = self.assign_dirichlet(a=1.0, cell_types=self.non_immune_cells)
-        else:
-            raise ValueError("Method not supported. Choose 'uniform_sparse', 'uniform', or 'dirichlet'.")
-
-        # normalize (sum to 1)
-        self.im_summary = im_summary.div(im_summary.sum(axis=1), axis=0)
-        self.non_im_summary = non_im_summary.div(non_im_summary.sum(axis=1), axis=0)
-
-        summary_df = pd.concat([self.im_summary, self.non_im_summary], axis=1)
-        self.summary_df = summary_df.div(summary_df.sum(axis=1), axis=0)  # normalize to sum to 1
-    
-    def set_data(self, summary_df=None, cell_idx_dict=None):
-        if summary_df is not None:
-            self.summary_df = summary_df
-        if cell_idx_dict is not None:
-            self.cell_idx_dict = cell_idx_dict
     
     def split_cell_idx(self, save_dir='./data/cell_idx', train_ratio=0.7):
         # Extract info
@@ -320,12 +445,6 @@ class TSCA_Simulator(BaseSimulator):
 
         summary_df = pd.concat([self.im_summary, self.non_im_summary], axis=1)
         self.summary_df = summary_df.div(summary_df.sum(axis=1), axis=0)  # normalize to sum to 1
-    
-    def set_data(self, summary_df=None, cell_idx_dict=None):
-        if summary_df is not None:
-            self.summary_df = summary_df
-        if cell_idx_dict is not None:
-            self.cell_idx_dict = cell_idx_dict
     
     def split_cell_idx(self, info_df=None, save_dir='./data/cell_idx'):
         if info_df is None:

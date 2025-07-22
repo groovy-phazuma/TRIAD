@@ -149,7 +149,7 @@ class tape():
     def set4tissue_application(self):
         train_x, val_x, test_x, train_y, val_y, test_y = prep4tissue(h5ad_path=self.cfg.paths.h5ad_path, 
                                                                      target=self.cfg.common.target_domain,
-                                                                     test_ratio=self.cfg.scaden.test_ratio,
+                                                                     test_ratio=self.cfg.tape.test_ratio,
                                                                      target_path=self.cfg.paths.target_path)
         
         self.train_source_loader = Data.DataLoader(simdatset(train_x, train_y), batch_size=self.batch_size, shuffle=True)
