@@ -422,6 +422,7 @@ class InferenceTrainer(BaseTrainer):
             n_samples=self.cfg.common.n_samples,
             n_vtop=self.cfg.common.n_vtop,
             target_log_conv=self.cfg.common.target_log_conv,
+            mm_scale=self.cfg.common.mm_scale,
             seed=self.seed,
             vtop_mode=self.cfg.common.vtop_mode,
         )
