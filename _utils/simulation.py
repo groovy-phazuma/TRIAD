@@ -4,8 +4,6 @@ Created on 2024-11-27 (Wed) 21:52:13
 
 @author: I.Azuma
 """
-# %%
-BASE_DIR = "/workspace/cluster/HDD/azuma/TopicModel_Deconv"
 
 import os
 import random
@@ -13,134 +11,110 @@ import numpy as np
 import pandas as pd
 import scanpy as sc
 import matplotlib.pyplot as plt
-
 from tqdm import tqdm
 
-import sys
-
-sys.path.append(BASE_DIR+'/github/LiverDeconv')
-import liver_deconv as ld
-
-sys.path.append(BASE_DIR+'/github/GLDADec')
-from _utils import plot_utils as pu
-
-sys.path.append(BASE_DIR+'/github/deconv-utils')
-from src import evaluation as ev
-
-# %%
-class BaseSimulator():
-    def __init__(self,sample_size, cell_idx, adata=None):
+class BaseSimulator:
+    def __init__(self, sample_size, method='dirichlet'):
         self.sample_size = sample_size
-        self.cell_idx = cell_idx
-        self.adata = adata
+        self.method = method
+        self.summary_df = None
+        self.cell_idx_dict = None
+        self.adata = None
     
-    def assign_uniform(self, cell_types:list, sparse=True):
+    def assign_uniform(self, cell_types: list, sparse=True):
+        """Generate uniform distribution for cell type proportions."""
         final_res = []
         for idx in range(self.sample_size):
+            np.random.seed(seed=idx)
             if sparse:
-                # select consisting cell types from cell_types at random
-                np.random.seed(seed=idx)
-                use_cell_types = np.random.choice(cell_types, size=np.random.randint(1,len(cell_types)+1), replace=False)
+                # Randomly select subset of cell types
+                use_cell_types = np.random.choice(
+                    cell_types, 
+                    size=np.random.randint(1, len(cell_types) + 1), 
+                    replace=False
+                )
                 p_list = np.random.rand(len(use_cell_types))
-
-                # assign random proportion to each cell type
-                final_p_list = [0]*len(cell_types)
+                
+                # Create full proportion list
+                final_p_list = np.zeros(len(cell_types))
                 for j, c in enumerate(use_cell_types):
                     final_p_list[cell_types.index(c)] = p_list[j]
-                
-                norm_p_list = list(final_p_list / sum(final_p_list)) # sum to 1
-                final_res.append(norm_p_list)
             else:
-                np.random.seed(seed=idx)
-                p_list = np.random.rand(len(cell_types))
-                norm_p_list = list(p_list / sum(p_list)) # sum to 1
-                final_res.append(norm_p_list)
-        summary_df = pd.DataFrame(final_res,columns=cell_types)
-
-        return summary_df
+                final_p_list = np.random.rand(len(cell_types))
+            
+            # Normalize to sum to 1
+            norm_p_list = final_p_list / final_p_list.sum() if final_p_list.sum() > 0 else final_p_list
+            final_res.append(norm_p_list)
+        
+        return pd.DataFrame(final_res, columns=cell_types)
     
-    def assign_dirichlet(self, cell_types:list, a=1.0, do_viz=False):
-        alpha = [a]*len(cell_types)
-
+    def assign_dirichlet(self, cell_types: list, alpha=1.0, do_viz=False):
+        """Generate Dirichlet distribution for cell type proportions."""
+        alpha_vec = [alpha] * len(cell_types)
         np.random.seed(seed=42)
-        data = np.random.dirichlet(alpha, size=self.sample_size)
+        data = np.random.dirichlet(alpha_vec, size=self.sample_size)
 
-        if do_viz:
-            # visualization
-            plt.hist(data[:, 1], bins=50, alpha=0.7, color='blue', label=f'a={a}')
+        if do_viz and len(cell_types) > 1:
+            plt.hist(data[:, 1], bins=50, alpha=0.7, color='blue', label=f'alpha={alpha}')
             plt.xlabel('Value')
             plt.ylabel('Frequency')
             plt.title('Distribution of proportion')
             plt.legend()
             plt.show()
         
-        summary_df = pd.DataFrame(data,columns=cell_types)
-
-        return summary_df
+        return pd.DataFrame(data, columns=cell_types)
 
     def create_ref(self):
-        if hasattr(self.adata.X, 'todense'):
-            raw_exp = np.array(self.adata.X.todense())
-        else:
-            raw_exp = np.array(self.adata.X)
-            
+        """Create reference matrix from training data."""
+        raw_exp = self._get_expression_matrix()
         pooled_exp = []
-        for i,k in enumerate(self.cell_idx_dict):
-            c_idx = self.cell_idx_dict[k]['train']
-            tmp_mean = raw_exp[c_idx].mean(axis=0)
+        
+        for cell_type, idx_dict in self.cell_idx_dict.items():
+            train_idx = idx_dict['train']
+            tmp_mean = raw_exp[train_idx].mean(axis=0)
             pooled_exp.append(tmp_mean)
 
         ref_df = pd.DataFrame(pooled_exp).T
-        ref_df.index = self.adata.var_names  # gene names
-        ref_df.columns = self.cell_idx_dict.keys()  # cell types
-
+        ref_df.index = self.adata.var_names
+        ref_df.columns = self.cell_idx_dict.keys()
         return ref_df
-
-    def bulk_ref_qc(self, bulk_df, ref_df, summary_df):
-        # preprocessing
-        bulk_df.index = [t.upper() for t in bulk_df.index] 
-        ref_df.index = [t.upper() for t in ref_df.index]
-        bulk_df = np.log1p(bulk_df)
-        ref_df = np.log1p(ref_df)
-
-        # ElasticNet deconvolution
-        dat = ld.LiverDeconv()
-        dat.set_data(df_mix=bulk_df, df_all=ref_df)
-        dat.pre_processing(do_ann=False,ann_df=None,do_log2=False,do_quantile=False,do_trimming=False,do_drop=True)
-        dat.narrow_intersec()
-
-        dat.create_ref(sep="",number=100,limit_CV=1,limit_FC=0.1,log2=False,verbose=True,do_plot=True)
-
-        dat.do_fit()
-        res = dat.get_res()
-        norm_res = res.div(res.sum(axis=1),axis=0)  # normalize to sum to 1
-
-        # visualize the result
-        for target_cell in ref_df.columns:
-            res = ev.eval_deconv(dec_name_list=[[target_cell]], val_name_list=[[target_cell]], deconv_df=norm_res, y_df=summary_df, do_plot=True)
-        
-    def assign(self):
-        assert self.method in ['uniform_sparse', 'uniform', 'dirichlet'], "Method not supported. Choose 'uniform_sparse', 'uniform', or 'dirichlet'."
-        if self.method == 'uniform_sparse':
-            # assign uniform distribution
-            im_summary = self.assign_uniform(cell_types=self.immune_cells, sparse=True)
-            non_im_summary = self.assign_uniform(cell_types=self.non_immune_cells, sparse=True)
-        elif self.method == 'uniform':
-            # assign uniform distribution
-            im_summary = self.assign_uniform(cell_types=self.immune_cells, sparse=False)
-            non_im_summary = self.assign_uniform(cell_types=self.non_immune_cells, sparse=False)
-        elif self.method == 'dirichlet':
-            im_summary = self.assign_dirichlet(a=1.0, cell_types=self.immune_cells)
-            non_im_summary = self.assign_dirichlet(a=1.0, cell_types=self.non_immune_cells)
+    
+    def _get_expression_matrix(self):
+        """Helper method to get expression matrix from adata."""
+        if hasattr(self.adata.X, 'todense'):
+            return np.array(self.adata.X.todense())
         else:
-            raise ValueError("Method not supported. Choose 'uniform_sparse', 'uniform', or 'dirichlet'.")
-
-        # normalize (sum to 1)
+            return np.array(self.adata.X)
+    def assign(self, nonim_w=None):
+        """Assign cell type proportions using specified method."""
+        methods = {
+            'uniform_sparse': lambda types: self.assign_uniform(types, sparse=True),
+            'uniform': lambda types: self.assign_uniform(types, sparse=False), 
+            'dirichlet': lambda types: self.assign_dirichlet(types, alpha=1.0)
+        }
+        
+        if self.method not in methods:
+            raise ValueError(f"Method not supported. Choose from: {list(methods.keys())}")
+        
+        # Generate proportions for immune and non-immune cells
+        im_summary = methods[self.method](self.immune_cells)
+        non_im_summary = methods[self.method](self.non_immune_cells)
+        
+        # Normalize to sum to 1
         self.im_summary = im_summary.div(im_summary.sum(axis=1), axis=0)
         self.non_im_summary = non_im_summary.div(non_im_summary.sum(axis=1), axis=0)
 
+        # Apply random weights if specified
+        if nonim_w is not None:
+            random_w = np.random.uniform(low=nonim_w, high=1.0, size=self.sample_size)
+            for i in range(self.sample_size):
+                w = random_w[i]
+                self.im_summary.iloc[i] *= (1 - w)
+                self.non_im_summary.iloc[i] *= w
+
+        # Combine and normalize final result
         summary_df = pd.concat([self.im_summary, self.non_im_summary], axis=1)
-        self.summary_df = summary_df.div(summary_df.sum(axis=1), axis=0)  # normalize to sum to 1
+        self.summary_df = summary_df.div(summary_df.sum(axis=1), axis=0)
     
     def set_data(self, summary_df=None, cell_idx_dict=None, adata=None):
         if summary_df is not None:
@@ -151,459 +125,226 @@ class BaseSimulator():
             self.adata = adata
 
 class LiverCellAtlas_Simulator(BaseSimulator):
-    def __init__(self, sample_size=8000, method='dirichlet'):
-        self.sample_size = sample_size
-        self.method = method
-        #self.immune_cells = ['Neutrophils', 'Monocytes', 'Kupffer', 'NK', 'T', 'B', 'pDCs', 'cDC1s', 'cDC2s']
-        #self.non_immune_cells = ['Hepatocytes', 'Cholangiocytes', 'Fibroblasts']
-        self.immune_cells = ['Neutrophils', 'Monocytes & Monocyte-derived cells', 'Kupffer cells', 'NK cells', 'T cells', 'B cells', 'pDCs', 'cDC1s', 'cDC2s']
+    def __init__(self, sample_size=8000, method='dirichlet', base_dir=None):
+        super().__init__(sample_size, method)
+        self.base_dir = base_dir or "/workspace/cluster/HDD/azuma/TopicModel_Deconv"
+        self.immune_cells = ['Neutrophils', 'Monocytes & Monocyte-derived cells', 'Kupffer cells', 
+                           'NK cells', 'T cells', 'B cells', 'pDCs', 'cDC1s', 'cDC2s']
         self.non_immune_cells = ['Hepatocytes', 'Cholangiocytes', 'Fibroblasts']
 
-        self.summary_df = None
-        self.cell_idx_dict = None
-
         self.filter_dict = {
-            'Neutrophils': 'Neutrophils',
-            'Monocytes & Monocyte-derived cells': 'Monocytes',
-            'Kupffer cells': 'Kupffer',
-            'NK cells': 'NK',
-            'T cells': 'T',
-            'B cells': 'B',
-            'pDCs': 'pDCs',
-            'cDC1s': 'cDC1s',
-            'cDC2s': 'cDC2s',
-            'Hepatocytes': 'Hepatocytes',
-            'Cholangiocytes': 'Cholangiocytes',
-            'Fibroblasts': 'Fibroblasts'
+            'Neutrophils': 'Neutrophils', 'Monocytes & Monocyte-derived cells': 'Monocytes',
+            'Kupffer cells': 'Kupffer', 'NK cells': 'NK', 'T cells': 'T', 'B cells': 'B',
+            'pDCs': 'pDCs', 'cDC1s': 'cDC1s', 'cDC2s': 'cDC2s',
+            'Hepatocytes': 'Hepatocytes', 'Cholangiocytes': 'Cholangiocytes', 'Fibroblasts': 'Fibroblasts'
         }
     
     def split_cell_idx(self, save_dir='./data/cell_idx', train_ratio=0.7):
-        # Extract info
+        """Split cell indices into train/test sets."""
+        if self.adata is None:
+            raise ValueError("adata must be set before splitting cell indices")
+            
         cell_types = self.immune_cells + self.non_immune_cells
         cell_idx_dict = {}
+        
         for cell in cell_types:
             cellname = self.filter_dict[cell]
-            #df = pd.read_table(BASE_DIR+f'/datasource/Simulated_Data/LiverCellAtlas/signature/{cell}_cell_counts.txt', index_col=0)
-            mat = self.adata[self.adata.obs['cell_type'] == cell, :].copy().X.toarray().T
-
-            target_idx = [i for i in range(mat.shape[1])]
+            cell_mask = self.adata.obs['cell_type'] == cell
+            target_idx = list(range(cell_mask.sum()))
             cell_size = len(target_idx)
-            print("{}: {} cells are detected".format(cell, cell_size))
-            # Train / Test Split
+            print(f"{cell}: {cell_size} cells detected")
+            
+            # Train/Test split
             random.seed(42)
             shuffle_idx = random.sample(target_idx, cell_size)
-            train_idx = shuffle_idx[0:int(cell_size * train_ratio)]
-            test_idx = shuffle_idx[int(cell_size * train_ratio):]
+            split_point = int(cell_size * train_ratio)
+            train_idx = shuffle_idx[:split_point]
+            test_idx = shuffle_idx[split_point:]
             cell_idx_dict[cell] = {'train': train_idx, 'test': test_idx}
 
-            if save_dir is not None:
+            # Save indices if directory specified
+            if save_dir:
                 os.makedirs(save_dir, exist_ok=True)
-            pd.to_pickle(train_idx, os.path.join(save_dir, f'{cellname}_train_idx.pkl'))
-            pd.to_pickle(test_idx, os.path.join(save_dir, f'{cellname}_test_idx.pkl'))
+                pd.to_pickle(train_idx, os.path.join(save_dir, f'{cellname}_train_idx.pkl'))
+                pd.to_pickle(test_idx, os.path.join(save_dir, f'{cellname}_test_idx.pkl'))
         
         self.cell_idx_dict = cell_idx_dict
     
-    def create_sim_bulk(self, pool_size=500, mode='train'):
-        summary_df = self.summary_df
-        cell_idx_dict = self.cell_idx_dict
-        tototal_cells = summary_df.columns.tolist()
-
-        adata = sc.read_h5ad(BASE_DIR+'/datasource/scRNASeq/LiverCellAtlas/mouseStStAll/processed/liver_adata_148202x19052.h5ad')
-
-        pooled_exp = []
-        np.random.seed(42)  # Set seed once outside the loop
-
-        reverse_dict = {v: k for k, v in self.filter_dict.items()}  # Reverse the dictionary for easier access
+    def create_sim_bulk(self, pool_size=500, mode='train', adata_path=None):
+        """Create simulated bulk expression data."""
+        if self.summary_df is None or self.cell_idx_dict is None:
+            raise ValueError("summary_df and cell_idx_dict must be set")
         
-        for idx in tqdm(range(len(summary_df))):
-            p_list = summary_df.iloc[idx].values
+        # Load adata if path provided, otherwise use self.adata
+        if adata_path:
+            adata = sc.read_h5ad(adata_path)
+        elif self.adata is not None:
+            adata = self.adata
+        else:
+            # Default path as fallback
+            adata_path = f"{self.base_dir}/datasource/scRNASeq/LiverCellAtlas/mouseStStAll/processed/liver_adata_148202x19052.h5ad"
+            adata = sc.read_h5ad(adata_path)
+
+        total_cells = self.summary_df.columns.tolist()
+        pooled_exp = []
+        np.random.seed(42)
+        
+        #reverse_dict = {v: k for k, v in self.filter_dict.items()}
+        
+        for idx in tqdm(range(len(self.summary_df))):
+            p_list = self.summary_df.iloc[idx].values
             bulk_single = None
-            bulk_size = 0
+            
             for j, p in enumerate(p_list):
-                cell = tototal_cells[j]
-                cellname = reverse_dict[cell]
+                cell = total_cells[j]
+                #cellname = self.reverse_dict[cell]
+                cellname = cell
                 tmp_size = int(pool_size * p)
-                candi_idx = cell_idx_dict[cellname][mode]
+                candi_idx = self.cell_idx_dict[cellname][mode]
 
-                # Use different random state for each sample to maintain reproducibility
-                rng = np.random.RandomState(42 + idx * len(tototal_cells) + j)
-                if len(candi_idx) < tmp_size:
-                    select_idx = rng.choice(candi_idx, size=tmp_size, replace=True)
-                else:
-                    select_idx = rng.choice(candi_idx, size=tmp_size, replace=False)
-                select_idx = [i for i in select_idx]  # Adjust index to match the file format
+                # Generate reproducible random indices
+                rng = np.random.RandomState(42 + idx * len(total_cells) + j)
+                select_idx = rng.choice(candi_idx, size=tmp_size, replace=len(candi_idx) < tmp_size)
                 
+                # Get expression data for selected cells
                 unique_cols = list(dict.fromkeys(select_idx))
-
-                """
-                df = pd.read_table(
-                    BASE_DIR+f'/datasource/Simulated_Data/LiverCellAtlas/signature/{cell}_cell_counts.txt',
-                    index_col=0,
-                    usecols=[0] + unique_cols
-                )
-                """
                 tmp_adata = adata[adata.obs['cell_type'] == cellname, :].copy()
-                #print(tmp_adata.shape, cellname, unique_cols)
-                df = tmp_adata[unique_cols, :].to_df().T  # Use AnnData to get the expression matrix
-                col_pos_map = {val: i for i, val in enumerate(unique_cols)}  # e.g., {2:0, 3:1, 4:2, 5:3}
-                col_map = [col_pos_map[i] for i in select_idx]               # e.g., [0,1,2,2,3]
-                bulk_size += len(col_map)
-                # repeatedly select columns based on col_map
-                df_repeated = df.iloc[:, col_map]
-                tmp_sum = df_repeated.sum(axis=1).values
-
-                if tmp_sum is None or tmp_sum.size == 0:
-                    continue
-
-                # add to bulk_single
-                if bulk_single is None:
-                    bulk_single = tmp_sum
-                else:
-                    bulk_single = bulk_single + tmp_sum
-            if bulk_single is not None:
-                pooled_exp.append(bulk_single.flatten())
-            #print(f"Sample {idx+1}/{len(summary_df)}: {bulk_size} cells pooled.")
-        
-        # Convert to DataFrame more efficiently
-        pooled_exp = np.array(pooled_exp)
-        bulk_df = pd.DataFrame(pooled_exp.T)
-        bulk_df.index = df.index  # gene names
-
-        return bulk_df
-
-
-class GSE139107_Simulator(BaseSimulator):
-    def __init__(self, sample_size=8000, method='dirichlet'):
-        self.sample_size = sample_size
-        self.method = method
-        self.immune_cells = ['NK','T_CD4','T_CD8_CytT','Monocyte','Mast_cells']
-        self.non_immune_cells = ['Fibroblast','Ciliated','Alveolar_Type1','Alveolar_Type2']
-
-        self.summary_df = None
-        self.cell_idx_dict = None
-
-        self.filter_dict = {
-            'NK': 'NK',
-            'T_CD4': 'CD4',
-            'T_CD8_CytT':'CD8',
-            'Monocyte':'Monocyte',
-            'Mast_cells':'MAST',
-            'Fibroblast':'Fibrosis',
-            'Ciliated': 'Ciliated',
-            'Alveolar_Type1': 'AT1',
-            'Alveolar_Type2': 'AT2'
-        }
-    
-    def filter_exp(self):
-        """
-        #target_cells = ['NK']
-        #target_cells = ['Monocytes']
-        #target_cells = ['CD4+ Th', 'Naive CD4+ T', ]
-        #target_cells = ['Cytotoxic CD8+ T', 'Naive CD8+ T']
-        #target_cells = ['MAST']
-        #target_cells = ['Myofibroblasts']
-        #target_cells = ['Ciliated']
-        #target_cells = ['AT1']
-        #target_cells = ['AT2']
-        """
-        info_df = pd.read_table(BASE_DIR+'/datasource/scRNASeq/GSE131907/GSE131907_Lung_Cancer_cell_annotation.txt')
-        lung_info = info_df[info_df['Sample_Origin'].isin(['nLung', 'tLung'])]
-        cell_types = lung_info['Cell_type'].unique().tolist()
-        sub_types = sorted(lung_info['Cell_subtype'].dropna().unique().tolist())
-
-        target_cells = ['NK']
-        target_samples = lung_info[lung_info['Cell_subtype'].isin(target_cells)]['Index'].tolist()
-        input_file = BASE_DIR+'/datasource/scRNASeq/GSE131907/GSE131907_Lung_Cancer_raw_UMI_matrix.txt'
-        output_file = BASE_DIR+'/datasource/Simulated_Data/GSE139107/signature/NK_filtered_matrix.txt'
-        with open(input_file, 'r') as fin:
-            header = fin.readline().rstrip('\n').split('\t')
-            
-            # target columns ('Gene' + selected samples)
-            selected_idx = [0] + [i for i, col in enumerate(header) if col in target_samples]
-            
-            # write
-            with open(output_file, 'w') as fout:
-                fout.write('\t'.join([header[i] for i in selected_idx]) + '\n')
-                for line in fin:
-                    values = line.rstrip('\n').split('\t')
-                    selected_values = [values[i] for i in selected_idx]
-                    fout.write('\t'.join(selected_values) + '\n')
-    
-    def split_cell_idx(self, save_dir='./data/cell_idx', train_ratio=0.7):
-        # Extract info
-        cell_types = self.immune_cells + self.non_immune_cells
-        cell_idx_dict = {}
-        for cell in cell_types:
-            cellname = self.filter_dict[cell]
-            df = pd.read_table(BASE_DIR+f'/datasource/Simulated_Data/GSE139107/signature/{cellname}_filtered_matrix.txt', index_col=0)
-            target_idx = [i for i in range(df.shape[1])]
-            cell_size = len(target_idx)
-            print("{}: {} cells are detected".format(cell, cell_size))
-            # Train / Test Split
-            random.seed(42)
-            shuffle_idx = random.sample(target_idx, cell_size)
-            train_idx = shuffle_idx[0:int(cell_size * train_ratio)]
-            test_idx = shuffle_idx[int(cell_size * train_ratio):]
-            cell_idx_dict[cell] = {'train': train_idx, 'test': test_idx}
-
-            if save_dir is not None:
-                os.makedirs(save_dir, exist_ok=True)
-            pd.to_pickle(train_idx, os.path.join(save_dir, f'{cell}_train_idx.pkl'))
-            pd.to_pickle(test_idx, os.path.join(save_dir, f'{cell}_test_idx.pkl'))
-        
-        self.cell_idx_dict = cell_idx_dict
-    
-    def create_sim_bulk(self, pool_size=500, mode='train'):
-        summary_df = self.summary_df
-        cell_idx_dict = self.cell_idx_dict
-        tototal_cells = summary_df.columns.tolist()
-
-        pooled_exp = []
-        np.random.seed(42)  # Set seed once outside the loop
-        
-        for idx in tqdm(range(len(summary_df))):
-            p_list = summary_df.iloc[idx].values
-            bulk_single = None
-            bulk_size = 0
-            for j, p in enumerate(p_list):
-                cell = tototal_cells[j]
-                tmp_size = int(pool_size * p)
-                candi_idx = cell_idx_dict[cell][mode]
-                cellname = self.filter_dict[cell]
-
-                # Use different random state for each sample to maintain reproducibility
-                rng = np.random.RandomState(42 + idx * len(tototal_cells) + j)
-                if len(candi_idx) < tmp_size:
-                    select_idx = rng.choice(candi_idx, size=tmp_size, replace=True)
-                else:
-                    select_idx = rng.choice(candi_idx, size=tmp_size, replace=False)
-                select_idx = [i + 1 for i in select_idx]  # Adjust index to match the file format
+                df = tmp_adata[unique_cols, :].to_df().T
                 
-                unique_cols = list(dict.fromkeys(select_idx))
-                df = pd.read_table(
-                    f'D:/datasource/Deconvolution/GSE131907/signature/{cellname}_filtered_matrix.txt',
-                    index_col=0,
-                    usecols=[0] + unique_cols
-                )
-                col_pos_map = {val: i for i, val in enumerate(unique_cols)}  # e.g., {2:0, 3:1, 4:2, 5:3}
-                col_map = [col_pos_map[i] for i in select_idx]               # e.g., [0,1,2,2,3]
-                bulk_size += len(col_map)
-                # repeatedly select columns based on col_map
+                # Handle repeated selections
+                col_pos_map = {val: i for i, val in enumerate(unique_cols)}
+                col_map = [col_pos_map[i] for i in select_idx]
                 df_repeated = df.iloc[:, col_map]
                 tmp_sum = df_repeated.sum(axis=1).values
 
-                if tmp_sum is None or tmp_sum.size == 0:
-                    continue
-
-                # add to bulk_single
-                if bulk_single is None:
-                    bulk_single = tmp_sum
-                else:
-                    bulk_single = bulk_single + tmp_sum
+                if tmp_sum.size > 0:
+                    bulk_single = tmp_sum if bulk_single is None else bulk_single + tmp_sum
+            
             if bulk_single is not None:
                 pooled_exp.append(bulk_single.flatten())
-            #print(f"Sample {idx+1}/{len(summary_df)}: {bulk_size} cells pooled.")
         
-        # Convert to DataFrame more efficiently
+        # Create DataFrame
         pooled_exp = np.array(pooled_exp)
         bulk_df = pd.DataFrame(pooled_exp.T)
         bulk_df.index = df.index  # gene names
-
         return bulk_df
-        
+
 
 class TSCA_Simulator(BaseSimulator):
     def __init__(self, adata=None, sample_size=8000, method='dirichlet'):
+        super().__init__(sample_size, method)
         self.adata = adata
-        self.sample_size = sample_size
-        self.method = method
-        self.immune_cells = ['NK','T_CD4','T_CD8_CytT','Monocyte','Mast_cells']
-        self.non_immune_cells = ['Fibroblast','Ciliated','Alveolar_Type1','Alveolar_Type2']
-
-        self.summary_df = None
-        self.cell_idx_dict = None
+        self.immune_cells = ['NK', 'T_CD4', 'T_CD8_CytT', 'Monocyte', 'Mast_cells']
+        self.non_immune_cells = ['Fibroblast', 'Ciliated', 'Alveolar_Type1', 'Alveolar_Type2']
     
-    def assign(self):
-        assert self.method in ['uniform_sparse', 'uniform', 'dirichlet'], "Method not supported. Choose 'uniform_sparse', 'uniform', or 'dirichlet'."
-        if self.method == 'uniform_sparse':
-            # assign uniform distribution
-            im_summary = self.assign_uniform(cell_types=self.immune_cells, sparse=True)
-            non_im_summary = self.assign_uniform(cell_types=self.non_immune_cells, sparse=True)
-        elif self.method == 'uniform':
-            # assign uniform distribution
-            im_summary = self.assign_uniform(cell_types=self.immune_cells, sparse=False)
-            non_im_summary = self.assign_uniform(cell_types=self.non_immune_cells, sparse=False)
-        elif self.method == 'dirichlet':
-            im_summary = self.assign_dirichlet(a=1.0, cell_types=self.immune_cells)
-            non_im_summary = self.assign_dirichlet(a=1.0, cell_types=self.non_immune_cells)
-        else:
-            raise ValueError("Method not supported. Choose 'uniform_sparse', 'uniform', or 'dirichlet'.")
-
-        # normalize (sum to 1)
-        self.im_summary = im_summary.div(im_summary.sum(axis=1), axis=0)
-        self.non_im_summary = non_im_summary.div(non_im_summary.sum(axis=1), axis=0)
-
-        summary_df = pd.concat([self.im_summary, self.non_im_summary], axis=1)
-        self.summary_df = summary_df.div(summary_df.sum(axis=1), axis=0)  # normalize to sum to 1
-    
-    def split_cell_idx(self, info_df=None, save_dir='./data/cell_idx'):
+    def split_cell_idx(self, info_df=None, save_dir='./data/cell_idx', train_ratio=0.7):
+        """Split cell indices for TSCA data."""
         if info_df is None:
-            # adata = sc.read_h5ad("../Tissue_Stability_Cell_Atlas/lung.cellxgene.h5ad")
             info_df = self.adata.obs
-        # Extract info
+            
         cell_types = self.immune_cells + self.non_immune_cells
         cell_idx_dict = {}
+        
         for cell in cell_types:
             target_cell = info_df[info_df['Celltypes_updated_July_2020'] == cell]
             target_idx = [info_df.index.tolist().index(t) for t in target_cell.index.tolist()]
             cell_size = len(target_idx)
-            print("{}: {} cells are detected".format(cell, cell_size))
-            # Train / Test Split
+            print(f"{cell}: {cell_size} cells detected")
+            
+            # Train/Test split
             random.seed(42)
             shuffle_idx = random.sample(target_idx, cell_size)
-            train_idx = shuffle_idx[0:int(cell_size * 0.7)]
-            test_idx = shuffle_idx[int(cell_size * 0.7):]
+            split_point = int(cell_size * train_ratio)
+            train_idx = shuffle_idx[:split_point]
+            test_idx = shuffle_idx[split_point:]
             cell_idx_dict[cell] = {'train': train_idx, 'test': test_idx}
 
-            if save_dir is not None:
+            if save_dir:
                 os.makedirs(save_dir, exist_ok=True)
-            pd.to_pickle(train_idx, os.path.join(save_dir, f'{cell}_train_idx.pkl'))
-            pd.to_pickle(test_idx, os.path.join(save_dir, f'{cell}_test_idx.pkl'))
+                pd.to_pickle(train_idx, os.path.join(save_dir, f'{cell}_train_idx.pkl'))
+                pd.to_pickle(test_idx, os.path.join(save_dir, f'{cell}_test_idx.pkl'))
         
         self.cell_idx_dict = cell_idx_dict
 
     def create_sim_bulk(self, pool_size=500, mode='train'):
-        summary_df = self.summary_df
-        cell_idx_dict = self.cell_idx_dict
-        tototal_cells = summary_df.columns.tolist()
-
-        # Pre-convert sparse matrix to dense array once
-        if hasattr(self.adata.X, 'todense'):
-            raw_exp = np.array(self.adata.X.todense())
-        else:
-            raw_exp = np.array(self.adata.X)
-
+        """Create simulated bulk expression data for TSCA."""
+        if self.summary_df is None or self.cell_idx_dict is None:
+            raise ValueError("summary_df and cell_idx_dict must be set")
+            
+        total_cells = self.summary_df.columns.tolist()
+        raw_exp = self._get_expression_matrix()
         pooled_exp = []
-        np.random.seed(42)  # Set seed once outside the loop
+        np.random.seed(42)
         
-        for idx in tqdm(range(len(summary_df))):
-            p_list = summary_df.iloc[idx].values  # Use .values instead of .tolist() for speed
+        for idx in tqdm(range(len(self.summary_df))):
+            p_list = self.summary_df.iloc[idx].values
             final_idx = []
             
             for j, p in enumerate(p_list):
-                cell = tototal_cells[j]
-                tmp_size = int(pool_size * p)  # number of cells to be selected
-
-                candi_idx = cell_idx_dict[cell][mode]
+                cell = total_cells[j]
+                tmp_size = int(pool_size * p)
+                candi_idx = self.cell_idx_dict[cell][mode]
                 
-                # Use different random state for each sample to maintain reproducibility
-                rng = np.random.RandomState(42 + idx * len(tototal_cells) + j)
-                if len(candi_idx) < tmp_size:
-                    select_idx = rng.choice(candi_idx, size=tmp_size, replace=True)
-                else:
-                    select_idx = rng.choice(candi_idx, size=tmp_size, replace=False)
+                rng = np.random.RandomState(42 + idx * len(total_cells) + j)
+                select_idx = rng.choice(candi_idx, size=tmp_size, replace=len(candi_idx) < tmp_size)
                 final_idx.extend(select_idx)
             
-            if final_idx:  # Only process if there are selected indices
-                # Direct sum operation on selected rows
+            if final_idx:
                 tmp_sum = raw_exp[final_idx, :].sum(axis=0)
-                pooled_exp.append(tmp_sum.flatten())  # Ensure 1D array
+                pooled_exp.append(tmp_sum.flatten())
         
-        # Convert to DataFrame more efficiently
         pooled_exp = np.array(pooled_exp)
         bulk_df = pd.DataFrame(pooled_exp.T)
-        bulk_df.index = self.adata.var_names  # gene names
-
-        return bulk_df
-    
-    def create_sim_bulk_legacy(self, summary_df=None, pool_size=500, mode='train'):
-        if summary_df is None:
-            summary_df = self.summary
-        tototal_cells = summary_df.columns.tolist()
-
-        pooled_idx = []
-        for idx in tqdm(range(len(summary_df))):
-            p_list = summary_df.iloc[idx].tolist()
-            final_idx = []
-            for j, p in enumerate(p_list):
-                cell = tototal_cells[j]
-                tmp_size = int(pool_size * p)  # number of cells to be selected
-
-                candi_idx = self.cell_idx_dict[cell][mode]
-                # select tmp_size from tmp_df at random
-                np.random.seed(seed=42)
-                if len(candi_idx) < tmp_size:
-                    select_idx = np.random.choice(candi_idx, size=tmp_size, replace=True)
-                else:
-                    select_idx = np.random.choice(candi_idx, size=tmp_size, replace=False)
-                final_idx.extend(select_idx)
-            pooled_idx.append(final_idx)
-        
-        raw_exp = np.array(self.adata.X.todense())
-        pooled_exp = []
-        for exp_idx in tqdm(pooled_idx):
-            tmp_exp = raw_exp[exp_idx, :]
-            tmp_sum = tmp_exp.sum(axis=0)
-            pooled_exp.append(tmp_sum)
-        bulk_df = pd.DataFrame(pooled_exp).T
-        bulk_df.index = self.adata.var_names  # gene names
-
+        bulk_df.index = self.adata.var_names
         return bulk_df
 
 
-class MyPBMC_Simulator():
+class MyPBMC_Simulator:
     def __init__(self, adata, adata_counts, cell_idx_dict=None, sample_size=8000):
         self.adata = adata
         self.adata_counts = adata_counts
         self.sample_size = sample_size
-
-        cell_types = sorted(self.adata.obs['celltype'].unique().tolist())
-        self.cell_types = cell_types
-
+        self.cell_types = sorted(self.adata.obs['celltype'].unique().tolist())
+        
+        # Build cell index dictionary if not provided
         if cell_idx_dict is not None:
             self.cell_idx_dict = cell_idx_dict
         else:
             raw_idx = self.adata.obs.index.tolist()
-            cell_idx = {}
+            self.cell_idx_dict = {}
             for c in self.cell_types:
-                tmp_idx = self.adata.obs[self.adata.obs['celltype']==c].index.tolist()
-                n_idx = [raw_idx.index(i) for i in tmp_idx]
-                cell_idx[c] = n_idx
-            self.cell_idx_dict = cell_idx
+                tmp_idx = self.adata.obs[self.adata.obs['celltype'] == c].index.tolist()
+                self.cell_idx_dict[c] = [raw_idx.index(i) for i in tmp_idx]
     
     def create_sim_bulk(self, summary_df=None, pool_size=500):
-        rs = 0
-        pooled_exp = []
+        """Create simulated bulk expression data for PBMC."""
         if summary_df is None:
             summary_df = self.summary_df
+            
+        pooled_exp = []
         for idx in tqdm(range(len(summary_df))):
             p_list = summary_df.iloc[idx].tolist()
             final_idx = []
+            
             for j, p in enumerate(p_list):
                 cell = self.cell_types[j]
-                tmp_size = int(pool_size*p)  # number of cells to be selected
-
+                tmp_size = int(pool_size * p)
                 candi_idx = self.cell_idx_dict[cell]
-                # select tmp_size from tmp_df at random
-                np.random.seed(seed=rs)
-                if len(candi_idx) < tmp_size:
-                    select_idx = np.random.choice(candi_idx, size=tmp_size, replace=True)
-                else:
-                    select_idx = np.random.choice(candi_idx, size=tmp_size, replace=False)
-            
-                assert len(self.adata.X[select_idx]) == tmp_size
+                
+                # Random selection with reproducible seed
+                np.random.seed(seed=idx)
+                select_idx = np.random.choice(candi_idx, size=tmp_size, replace=len(candi_idx) < tmp_size)
                 final_idx.extend(select_idx)
             
-            # QC
-            if len(final_idx) < (pool_size - len(self.cell_types)) or len(final_idx) > (pool_size + len(self.cell_types)):
-                print("Error: {} cells are selected".format(len(final_idx)))
-                break
+            # Quality check
+            expected_range = (pool_size - len(self.cell_types), pool_size + len(self.cell_types))
+            if not (expected_range[0] <= len(final_idx) <= expected_range[1]):
+                print(f"Warning: {len(final_idx)} cells selected (expected ~{pool_size})")
 
-            # sum up the expression (counts)
+            # Sum expression counts
             tmp_sum = list(np.array(self.adata_counts.X[final_idx].sum(axis=0))[0])
             pooled_exp.append(tmp_sum)
 
         bulk_df = pd.DataFrame(pooled_exp).T
         bulk_df.index = self.adata_counts.var_names
-
         return bulk_df
