@@ -80,6 +80,9 @@ class BaseTrainer:
         self.source_data_x = source_data.X.astype(np.float32)
         self.source_data_y = np.array(source_ratios, dtype=np.float32).transpose()
 
+        # sum to 1 amoung target_cells  NOTE: 250818
+        self.source_data_y = self.source_data_y / self.source_data_y.sum(axis=1, keepdims=True)
+
         tr_data = torch.FloatTensor(self.source_data_x)
         tr_labels = torch.FloatTensor(self.source_data_y)
         source_dataset = Data.TensorDataset(tr_data, tr_labels)
