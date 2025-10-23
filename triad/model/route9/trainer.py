@@ -81,7 +81,14 @@ class BaseTrainer:
         self.source_data_y = np.array(source_ratios, dtype=np.float32).transpose()
 
         # sum to 1 amoung target_cells  NOTE: 250818
-        self.source_data_y = self.source_data_y / self.source_data_y.sum(axis=1, keepdims=True)
+        #self.source_data_y = self.source_data_y / self.source_data_y.sum(axis=1, keepdims=True)
+
+        den = self.source_data_y.sum(axis=1, keepdims=True)
+        valid = den.squeeze() > 0
+        self.source_data_x = self.source_data_x[valid]
+        self.source_data_y = self.source_data_y[valid]
+        den = den[valid]
+        self.source_data_y = self.source_data_y / den
 
         tr_data = torch.FloatTensor(self.source_data_x)
         tr_labels = torch.FloatTensor(self.source_data_y)
@@ -201,7 +208,7 @@ class BaseTrainer:
             #scheduler1.step()
             #scheduler2.step()
 
-        torch.save(model.state_dict(), os.path.join(self.cfg.paths.triad_model_path, f'last_model.pth'))
+        torch.save(model.state_dict(), os.path.join(self.cfg.paths.triad_model_path, f'last_model_{self.seed}.pth'))
 
     def run_epoch(self, model, epoch, optimizer1, optimizer2, criterion_da, source_label, target_label):
         """
