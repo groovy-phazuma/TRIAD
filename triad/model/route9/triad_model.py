@@ -19,7 +19,7 @@ warnings.filterwarnings('ignore')
 from model.utils import *
 
 import sys
-BASE_DIR = '/workspace/cluster/HDD/azuma/TopicModel_Deconv'
+BASE_DIR = '/workspace/HDDX/TopicModel_Deconv'
 sys.path.append(BASE_DIR + '/github/TRIAD')
 from _utils import common_utils
 

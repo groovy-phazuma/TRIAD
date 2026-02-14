@@ -5,7 +5,7 @@ Created on 2024-09-27 (Fri) 14:17:06
 @author: I.Azuma
 """
 # %%
-BASE_DIR = '/workspace/cluster/HDD/azuma/TopicModel_Deconv'
+BASE_DIR = '/workspace/HDDX/TopicModel_Deconv'
 
 import gc
 import sys
@@ -28,7 +28,6 @@ from torch.optim.lr_scheduler import StepLR
 from torch.nn import functional as F
 
 sys.path.append(BASE_DIR+'/github/GLDADec')
-from _utils import gldadec_processing
 from _utils import plot_utils as pu
 
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")

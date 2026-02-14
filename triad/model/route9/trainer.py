@@ -35,7 +35,7 @@ import torch
 import torch.utils.data as Data
 
 # Set base directory and change working directory
-BASE_DIR = '/workspace/cluster/HDD/azuma/TopicModel_Deconv'
+BASE_DIR = '/workspace/HDDX/TopicModel_Deconv'
 os.chdir(BASE_DIR)
 
 # Import TRIAD model and utilities

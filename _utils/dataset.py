@@ -5,11 +5,6 @@ Created on 2025-06-13 (Fri) 16:47:01
 @author: I.Azuma
 """
 # %%
-BASE_DIR = '/workspace/cluster/HDD/azuma/TopicModel_Deconv'
-
-import os
-os.chdir(BASE_DIR)
-
 import gc
 import random
 import anndata
