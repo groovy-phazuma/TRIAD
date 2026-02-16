@@ -91,7 +91,7 @@ class DANN_Deconv(nn.Module):
 
         self.losses = LossFunctions()
 
-    def forward(self, x, alpha=1.0):
+    def forward(self, x, alpha=0.5):
         # feature extraction
         features = self.feature_extractor(x)
         

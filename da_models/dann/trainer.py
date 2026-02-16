@@ -20,8 +20,17 @@ import torch.utils.data as Data
 from da_models.dann.dann_model import *
 from _utils.dataset import *
 
-import os
-os.environ['CUDA_LAUNCH_BLOCKING'] = "1"
+import sys
+from pathlib import Path
+current_file = Path(__file__).resolve()
+model_root = current_file.parents[2]
+utils_path = model_root.parent / "deconv-utils"
+
+if str(utils_path) not in sys.path:
+    sys.path.append(str(utils_path))
+
+from src import evaluation as ev
+
 
 class BaseTrainer:
     """
@@ -98,10 +107,11 @@ class BaseTrainer:
         self.best_loss = 1e10
         self.update_flag = 0
 
-    def train_model(self):
+    def train_model(self, logger, eval_mode=False):
         model = DANN_Deconv(self.option_list).to(self.device)
         optimizer = torch.optim.Adam(model.parameters(), lr=model.lr, weight_decay=1e-5)
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=model.num_epochs)
+        #scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, milestones=[50, 100], gamma=0.1)  # [20, 100]
         
         criterion_da = nn.BCELoss().to(self.device) 
 
@@ -109,6 +119,16 @@ class BaseTrainer:
         target_iter = cycle(self.train_target_loader)
         for epoch in range(model.num_epochs):
             loss_dict = self.run_epoch(model, epoch, optimizer, criterion_da, target_iter)
+
+            if eval_mode is not None:
+                summary_df = self.eval_target(model)
+                loss_dict.update({
+                    'R': summary_df.loc['mean']['R'],
+                    'CCC': summary_df.loc['mean']['CCC'],
+                    'MAE': summary_df.loc['mean']['MAE'],
+                })
+
+            logger(epoch=epoch, **loss_dict)
 
             # Early stopping & Model Save
             if loss_dict['pred_loss'] < self.best_loss:
@@ -216,6 +236,36 @@ class BaseTrainer:
 
         return final_preds_target
 
+    def eval_target(self, model):
+        pred_df = self.predict(model)
+
+        dec_name_list = [["Monocytes"],["Unknown"],["Bcells"],["CD4Tcells"],["CD8Tcells"],["NK"]]
+        val_name_list = [["Monocytes"],["Unknown"],["Bcells"],["CD4Tcells"],["CD8Tcells"],["NK"]]
+
+        res = ev.eval_deconv(
+            dec_name_list=dec_name_list,
+            val_name_list=val_name_list,
+            deconv_df=pred_df,
+            y_df=self.target_y,
+            do_plot=False
+        )
+
+        # summarize
+        r_list = []
+        mae_list = []
+        ccc_list = []
+        for i in range(len(dec_name_list)):
+            tmp_res = res[i][0]
+            r, mae, ccc = tmp_res['R'], tmp_res['MAE'], tmp_res['CCC']
+            r_list.append(r)
+            mae_list.append(mae)
+            ccc_list.append(ccc)
+        summary_df = pd.DataFrame({'R': r_list, 'CCC': ccc_list, 'MAE': mae_list})
+        summary_df.index = [t[0] for t in val_name_list]
+        summary_df.loc['mean'] = summary_df.mean()
+        
+        return summary_df
+
 
 class BenchmarkTrainer(BaseTrainer):
     """
@@ -248,8 +298,8 @@ class BenchmarkTrainer(BaseTrainer):
         self.target_y = test_y
         self.gene_names = gene_names
 
-    def train_model(self):
-        super().train_model()
+    def train_model(self, logger):
+        super().train_model(logger=logger)
     
     def target_inference(self, model=None):
         if model is None:
