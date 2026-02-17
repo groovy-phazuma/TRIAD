@@ -110,8 +110,9 @@ class BaseTrainer:
     def train_model(self, logger, eval_mode=False):
         model = DANN_Deconv(self.option_list).to(self.device)
         optimizer = torch.optim.Adam(model.parameters(), lr=model.lr, weight_decay=1e-5)
-        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=model.num_epochs)
-        #scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, milestones=[50, 100], gamma=0.1)  # [20, 100]
+        #scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=model.num_epochs)
+        #scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lambda epoch: 0.95 ** epoch)
+        scheduler = torch.optim.lr_scheduler.OneCycleLR(optimizer, max_lr=model.lr, total_steps=model.num_epochs, pct_start=0.3, anneal_strategy='cos')
         
         criterion_da = nn.BCELoss().to(self.device) 
 

@@ -143,6 +143,6 @@ def get_batches(train_data, batch_size=300, rand=True, device="cuda:0"):
 def custom_loss(theta_tensor, prop_tensor):
     # deconvolution loss
     assert theta_tensor.shape[0] == prop_tensor.shape[0], "Batch size is different"
-    deconv_loss_dic = common_utils.calc_deconv_loss(theta_tensor, prop_tensor)
+    deconv_loss_dic = calc_deconv_loss(theta_tensor, prop_tensor)
     deconv_loss = deconv_loss_dic['cos_sim'] + 0.0 * deconv_loss_dic['rmse']
     return deconv_loss
