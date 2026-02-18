@@ -65,9 +65,6 @@ class BaseTrainer:
         self.source_data_x = source_data.X.astype(np.float32)
         self.source_data_y = np.array(source_ratios, dtype=np.float32).transpose()
 
-        # sum to 1 amoung target_cells  NOTE: 250818
-        #self.source_data_y = self.source_data_y / self.source_data_y.sum(axis=1, keepdims=True)
-
         den = self.source_data_y.sum(axis=1, keepdims=True)
         valid = den.squeeze() > 0
         self.source_data_x = self.source_data_x[valid]
@@ -120,11 +117,13 @@ class BaseTrainer:
         optimizer = torch.optim.Adam(model.parameters(), lr=model.lr, weight_decay=1e-5)
         
         # Scheduler configuration
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=model.num_epochs)
+        """
         scheduler = torch.optim.lr_scheduler.OneCycleLR(
             optimizer, max_lr=model.lr, total_steps=model.num_epochs, 
             pct_start=0.3, anneal_strategy='cos'
         )
-        
+        """
         self.best_loss = float('inf')
         target_iter = cycle(self.train_target_loader)
         
@@ -189,8 +188,8 @@ class BaseTrainer:
             optimizer.step()
 
             # 5. Accumulate metrics
-            total_pred_loss += pred_loss.item()
-            total_nwd_loss += nwd_loss.item()
+            total_pred_loss += model.pred_w * pred_loss.item()
+            total_nwd_loss += model.nwd_w * nwd_loss.item()
 
         # Epoch summary
         # Avoid division by zero if all batches were skipped
@@ -220,11 +219,12 @@ class BaseTrainer:
         
         model.eval()
         preds = None
-        for batch_idx, (x, y) in enumerate(self.test_target_loader):
-            logits, _, _, _ = model(x_s=x.to(self.device), y_s=None, x_t=None)
-            logits = logits.detach().cpu().numpy()
-            frac = y.detach().cpu().numpy()
-            preds = logits if preds is None else np.concatenate((preds, logits), axis=0)
+        with torch.no_grad():
+            for batch_idx, (x, y) in enumerate(self.test_target_loader):
+                logits, _, _, _ = model(x_s=x.to(self.device), y_s=None, x_t=None)
+                logits = logits.cpu().numpy()
+                frac = y.cpu().numpy()
+                preds = logits if preds is None else np.concatenate((preds, logits), axis=0)
         final_preds_target = pd.DataFrame(preds, columns=self.target_cells)
 
         return final_preds_target
