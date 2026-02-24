@@ -27,16 +27,15 @@ class LossFunctions:
         return total_loss
 
 
-class RegressionWassersteinDiscrepancy(nn.Module):
+class SortedMSE(nn.Module):
     def __init__(self):
-        super(RegressionWassersteinDiscrepancy, self).__init__()
+        super(SortedMSE, self).__init__()
 
     @staticmethod
     def regression_discrepancy(y_s: torch.Tensor, y_t: torch.Tensor) -> torch.Tensor:
         """
         Sorted MSE Loss 
         """
-        # バッチサイズが合わない場合は、小さい方に合わせて切り捨て
         min_len = min(y_s.size(0), y_t.size(0))
         y_s = y_s[:min_len]
         y_t = y_t[:min_len]
@@ -106,7 +105,7 @@ class DALN_Deconv(nn.Module):
         )
 
         # 3. Discrepancy Module
-        self.discrepancy = RegressionWassersteinDiscrepancy()
+        self.discrepancy = SortedMSE()
         self.loss_fn = LossFunctions()
 
     def forward(self, x_s: torch.Tensor, y_s: Optional[torch.Tensor] = None, x_t: Optional[torch.Tensor] = None):
@@ -127,6 +126,6 @@ class DALN_Deconv(nn.Module):
         # --- 2. Domain Adaptation (Discrepancy Loss) ---
         rwd_loss = torch.tensor(0.0, device=x_s.device)
         if features_t is not None:
-            rwd_loss = self.discrepancy(pred_s, pred_t)
+            rwd_loss = self.discrepancy(features_s, features_t)
 
         return pred_s, pred_t, deconv_loss, rwd_loss
