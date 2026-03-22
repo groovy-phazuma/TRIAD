@@ -18,7 +18,7 @@ import torch
 import torch.utils.data as Data
 
 # Import DARE-GRAM model and dataset utilities
-from da_models.dare_gram.daregram_model import *
+from da_models.mmd.mmd_model import *
 from _utils.dataset import *
 
 import sys
@@ -35,8 +35,8 @@ from src import evaluation as ev
 
 class BaseTrainer:
     """
-    Base class for DARE-GRAM training. Provides methods for building dataloaders, 
-    setting options, and the main training loop with DARE-GRAM domain adaptation.
+    Base class for MMD training. Provides methods for building dataloaders,
+    setting options, and the main training loop with MMD-based domain adaptation.
     """
     def __init__(self, cfg, seed=42):
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -97,7 +97,10 @@ class BaseTrainer:
         Create option list for the model and initialize parameters.
         """
         option_list = defaultdict(list)
-        for key, value in vars(self.cfg.daregram).items():
+        model_cfg = getattr(self.cfg, 'mmd', None)
+        if model_cfg is None:
+            model_cfg = getattr(self.cfg, 'daregram')
+        for key, value in vars(model_cfg).items():
             option_list[key] = value
         option_list['feature_num'] = self.source_data.shape[1]
         option_list['celltype_num'] = len(self.target_cells)
@@ -110,13 +113,13 @@ class BaseTrainer:
         self.update_flag = 0
 
     def train_model(self, logger, eval_mode=False):
-        model = DAREGRAM_Deconv(self.option_list).to(self.device)
+        model = MMD_Deconv(self.option_list).to(self.device)
         optimizer = torch.optim.Adam(model.parameters(), lr=model.lr, weight_decay=1e-5)
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=model.num_epochs)
         #scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lambda epoch: 0.95 ** epoch)
         #scheduler = torch.optim.lr_scheduler.OneCycleLR(optimizer, max_lr=model.lr, total_steps=model.num_epochs, pct_start=0.3, anneal_strategy='cos')
         
-        # No domain discriminator criterion needed for DARE-GRAM 
+        # No domain discriminator criterion needed for MMD
 
         self.best_loss = float('inf')
         for epoch in range(model.num_epochs):
@@ -144,7 +147,7 @@ class BaseTrainer:
                     break
             
             if epoch % 10 == 0:
-                print(f"Epoch:{epoch}, Loss:{loss_dict['total_loss']:.3f},  pred:{loss_dict['pred_loss']:.3f}, dare_gram:{loss_dict['dare_gram_loss']:.3f}")
+                print(f"Epoch:{epoch}, Loss:{loss_dict['total_loss']:.3f}, pred:{loss_dict['pred_loss']:.3f}, mmd:{loss_dict['mmd_loss']:.3f}")
             
             scheduler.step()
             gc.collect()
@@ -154,7 +157,8 @@ class BaseTrainer:
     def run_epoch(self, model, epoch, optimizer):
         model.train()
         total_pred_loss = 0.
-        total_dare_gram_loss = 0.
+        total_mmd_loss = 0.
+        total_weighted_loss = 0.
 
         n_batches = len(self.train_source_loader)
         target_iter = iter(self.train_target_loader)
@@ -169,7 +173,7 @@ class BaseTrainer:
             source_x, source_y = source_x.to(self.device), source_y.to(self.device)
             target_x = target_x.to(self.device)
 
-            # 2. Forward Pass (no alpha needed for DARE-GRAM)
+            # 2. Forward Pass
             pred_s, features_s = model(source_x)
             pred_t, features_t = model(target_x)
 
@@ -180,11 +184,11 @@ class BaseTrainer:
             else:
                 pred_loss = model.losses.custom_loss(pred_s, source_y)
 
-            # DARE-GRAM Loss (aligning Gram matrices between source and target features)
-            dare_gram_loss = model.compute_dare_gram_loss(features_s, features_t, device=self.device)
+            # MMD Loss (aligning source and target feature distributions)
+            mmd_loss = model.compute_mmd_loss(features_s, features_t, device=self.device)
 
             # Total Loss
-            total_loss = model.pred_w * pred_loss + model.dare_gram_w * dare_gram_loss
+            total_loss = model.pred_w * pred_loss + model.mmd_w * mmd_loss
 
             # 4. Backward & Optimization
             optimizer.zero_grad()
@@ -193,16 +197,18 @@ class BaseTrainer:
 
             # 5. Logging
             total_pred_loss += pred_loss.item()
-            total_dare_gram_loss += dare_gram_loss.item()
+            total_mmd_loss += mmd_loss.item()
+            total_weighted_loss += total_loss.item()
 
         # Epoch summary
         avg_pred = total_pred_loss / n_batches
-        avg_dare_gram = total_dare_gram_loss / n_batches
+        avg_mmd = total_mmd_loss / n_batches
+        avg_total = total_weighted_loss / n_batches
 
         return {
             'pred_loss': avg_pred,
-            'dare_gram_loss': avg_dare_gram,
-            'total_loss': avg_pred + avg_dare_gram,
+            'mmd_loss': avg_mmd,
+            'total_loss': avg_total,
         }
 
     def predict(self, model=None):
@@ -211,14 +217,14 @@ class BaseTrainer:
         """
         if model is None:
             model_path = os.path.join(self.cfg.paths.model_path, f'best_model_{self.seed}.pth')
-            model = DAREGRAM_Deconv(self.option_list).cuda()
+            model = MMD_Deconv(self.option_list).cuda()
             model.load_state_dict(torch.load(model_path))
             print("Model loaded from %s" % model_path)
 
         model.eval()
         preds = None
         for batch_idx, (x, y) in enumerate(self.test_target_loader):
-            logits, features = model(x.cuda())  # No alpha needed for DARE-GRAM
+            logits, features = model(x.cuda())
             logits = logits.detach().cpu().numpy()
             frac = y.detach().cpu().numpy()
             preds = logits if preds is None else np.concatenate((preds, logits), axis=0)
@@ -268,7 +274,10 @@ class BenchmarkTrainer(BaseTrainer):
         self.seed = seed
 
         self.set_data()
-        self.build_dataloader(batch_size=self.cfg.daregram.batch_size)
+        trainer_cfg = getattr(self.cfg, 'mmd', None)
+        if trainer_cfg is None:
+            trainer_cfg = getattr(self.cfg, 'daregram')
+        self.build_dataloader(batch_size=trainer_cfg.batch_size)
         self.set_options()
 
     def set_data(self):
@@ -294,14 +303,14 @@ class BenchmarkTrainer(BaseTrainer):
     def target_inference(self, model=None):
         if model is None:
             model_path = os.path.join(self.cfg.paths.model_path, f'best_model_{self.seed}.pth')
-            model = DAREGRAM_Deconv(self.option_list).cuda()
+            model = MMD_Deconv(self.option_list).cuda()
             model.load_state_dict(torch.load(model_path))
             print("Model loaded from %s" % model_path)
 
         model.eval()
         preds, gt = None, None
         for batch_idx, (x, y) in enumerate(self.test_target_loader):
-            logits, features = model(x.cuda())  # No alpha needed for DARE-GRAM
+            logits, features = model(x.cuda())
             logits = logits.detach().cpu().numpy()
             frac = y.detach().cpu().numpy()
             preds = logits if preds is None else np.concatenate((preds, logits), axis=0)
@@ -322,7 +331,10 @@ class InferenceTrainer(BaseTrainer):
         self.seed = seed
 
         self.set_data()
-        self.build_dataloader(batch_size=self.cfg.daregram.batch_size)
+        trainer_cfg = getattr(self.cfg, 'mmd', None)
+        if trainer_cfg is None:
+            trainer_cfg = getattr(self.cfg, 'daregram')
+        self.build_dataloader(batch_size=trainer_cfg.batch_size)
         self.set_options()
 
     def set_data(self):
