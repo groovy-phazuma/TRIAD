@@ -124,8 +124,7 @@ class MMD_Deconv(nn.Module):
 
         self.pred_w = _to_scalar_float(option_list.get('pred_w', 1.0), 1.0)
         self.mmd_w = _to_scalar_float(
-            option_list.get('mmd_w', option_list.get('dare_gram_w', 1.0)),
-            1.0,
+            option_list.get('mmd_w', 1.0), 1.0
         )
 
         default_sigma = [1.0, 2.0, 4.0, 8.0, 16.0]
@@ -198,7 +197,3 @@ class MMD_Deconv(nn.Module):
             device=device
         )
 
-
-class DAREGRAM_Deconv(MMD_Deconv):
-    """Backward-compatible alias for old class name."""
-    pass
