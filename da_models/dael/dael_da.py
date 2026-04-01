@@ -24,70 +24,28 @@ import torch.utils.data as Data
 import torch.nn.functional  as F
 import torch.backends.cudnn as cudnn
 
-from torchviz import make_dot
-from torch.utils.data import DataLoader
-from torch.utils.data.dataset import TensorDataset
-
 import warnings
 warnings.filterwarnings('ignore')
-
-from model.utils import *
-from model.route1_dael.dael_utils import *
-
-import sys
-BASE_DIR = '/workspace/mnt/cluster/HDD/azuma/TopicModel_Deconv'
-sys.path.append(BASE_DIR+'/github/GSTMDec')
-from _utils import common_utils
-
 cudnn.deterministic = True
 
+import sys
+sys.path.append("/workspace/HDDX/TopicModel_Deconv/github/TRIAD/da_models/dael")
+from dael_utils import add_noise
+
 class LossFunctions:
-    eps = 1e-8
-
-    def rec_loss(self, real, predicted, dropout_mask=None, rec_type='mse'):
-        if rec_type == 'mse':
-            if dropout_mask is None:
-                loss = torch.mean((real - predicted).pow(2))
-            else:
-                loss = torch.sum((real - predicted).pow(2) * dropout_mask) / torch.sum(dropout_mask)
-        elif rec_type == 'bce':
-            loss = F.binary_cross_entropy(predicted, real, reduction='none').mean()
-        else:
-            raise Exception
-        return loss
-    
-    def dag_rec_loss(self, real, predicted):
-        loss = torch.square(torch.norm(real - predicted, p=2))
-
-        n = real.shape[0]
-        loss = (0.5/n) * loss
-
-        return loss
-    
-    def summarize_loss(self, theta_tensor, prop_tensor):
-        # deconvolution loss
-        assert theta_tensor.shape[0] == prop_tensor.shape[0], "Batch size is different"
-        deconv_loss_dic = common_utils.calc_deconv_loss(theta_tensor, prop_tensor)
-        deconv_loss = deconv_loss_dic['cos_sim'] + 0.0*deconv_loss_dic['rmse']
-
-        return deconv_loss
-    
-    def L1_loss(self, preds, gt):
-        loss = torch.mean(torch.reshape(torch.square(preds - gt), (-1,)))
-        return loss
-    
-    def compute_h(self, w_adj):
-        d = w_adj.shape[0]
-        h = torch.trace(torch.matrix_exp(w_adj * w_adj)) - d
-
-        return h
-    
-    def dag_loss(self, rec_mse, w_adj, l1_penalty, alpha, rho):
-        curr_h = self.compute_h(w_adj)
-        loss = rec_mse + l1_penalty * torch.norm(w_adj, p=1) \
-            + alpha * curr_h + 0.5 * rho * curr_h * curr_h
+    def custom_loss(self, predicted_props, true_props):
+        assert predicted_props.shape == true_props.shape, "Shape mismatch between prediction and ground truth"
         
-        return loss
+        cos_sim = nn.CosineSimilarity(dim=1, eps=1e-6)
+        loss_cos = 1.0 - cos_sim(predicted_props, true_props).mean()
+        
+        mse = F.mse_loss(predicted_props, true_props)
+        loss_rmse = torch.sqrt(mse + 1e-8)
+    
+        total_loss = loss_cos + 0.0 * loss_rmse
+        
+        return total_loss
+
 
 class EncoderBlock(nn.Module):
     def __init__(self, in_dim, out_dim, do_rates):

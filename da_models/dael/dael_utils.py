@@ -169,15 +169,13 @@ class DAELdg_Labeled(Dataset):
         self.feats1 = feats1
         self.feats2 = feats2
 
-        train_data.obs = train_data.obs.reset_index(drop=True)
-
         self.indices = []
         self.y_prop = []
         self.domains = []
 
         for ds in source_ds:
             data = train_data[train_data.obs['ds'] == ds]
-            idx = data.obs.index.values.tolist()  
+            idx = np.where(np.asarray(train_data.obs['ds']) == ds)[0].tolist()
             y = torch.tensor(data.obs[target_cells].values).float()
             domain = self.domain_dict[ds]
 
@@ -218,14 +216,12 @@ class DAELda_UnLabeled(Dataset):
         self.feats1 = feats1
         self.feats2 = feats2
 
-        train_data.obs = train_data.obs.reset_index(drop=True)
-
         self.indices = []
         self.domains = []
         target_domain_counts = 0
         for ds in all_ds:
             data = train_data[train_data.obs['ds'] == ds]
-            idx = data.obs.index.values.tolist()  
+            idx = np.where(np.asarray(train_data.obs['ds']) == ds)[0].tolist()
             y = torch.tensor(data.obs[target_cells].values).float()
             domain = self.domain_dict[ds]
 
@@ -249,14 +245,12 @@ def build_daelda_loader(train_data, feats1, feats2, batch_size=128,
     if target_cells is None:
         target_cells = ['Monocytes', 'Unknown', 'CD4Tcells', 'Bcells', 'NK', 'CD8Tcells']
     all_ds = train_data.obs['ds'].unique().tolist()
-    train_data.obs = train_data.obs.reset_index(drop=True)
 
     # separate source and target domains
     source_domain_indices = []
     target_domain_indices = []
     for ds in all_ds:
-        data = train_data[train_data.obs['ds'] == ds]
-        idx = data.obs.index.values.tolist()
+        idx = np.where(np.asarray(train_data.obs['ds']) == ds)[0].tolist()
         if ds in source_domains:            
             source_domain_indices.extend(idx)
         elif ds in target_domains:

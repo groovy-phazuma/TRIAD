@@ -5,15 +5,14 @@ Created on 2025-04-30 (Wed) 11:05:55
 @author: I.Azuma
 """
 # %%
-BASE_DIR = '/workspace/mnt/cluster/HDD/azuma/TopicModel_Deconv'
 import os
-os.chdir(BASE_DIR)
-
 import gc
 import wandb
 import pandas as pd
 import seaborn as sns
 import matplotlib.pyplot as plt
+from pathlib import Path
+from itertools import cycle
 
 from scipy import sparse
 from collections import defaultdict
@@ -22,14 +21,24 @@ from sklearn.preprocessing import MinMaxScaler
 import torch
 
 import sys
-sys.path.append(BASE_DIR+'/github/GSTMDec/mda_dec')
-from model.route2_dael import dael_da
-from model.route2_dael import dael_utils
+current_file = Path(__file__).resolve()
+triad_root = current_file.parents[2]
+project_root = triad_root.parent
 
-sys.path.append(BASE_DIR+'/github/deconv-utils')
+if str(triad_root) not in sys.path:
+    sys.path.append(str(triad_root))
+
+from da_models.dael import dael_da
+from da_models.dael import dael_utils
+
+utils_path = project_root / "deconv-utils"
+if str(utils_path) not in sys.path:
+    sys.path.append(str(utils_path))
 from src import evaluation as ev
 
-sys.path.append(BASE_DIR+'/github/wandb-util')  
+wandb_utils_path = project_root / "wandb-util"
+if str(wandb_utils_path) not in sys.path:
+    sys.path.append(str(wandb_utils_path))
 from wandbutil import WandbLogger
 
 
@@ -57,16 +66,18 @@ class SimpleTrainer():
     def data_preprocessing(self):
         cfg = self.cfg
 
-        total_list = cfg.common.source_list + cfg.common.target_list
-        self.target_indices = [total_list.index(item) for item in cfg.common.target_list]
-        print(f"Target indices: {self.target_indices}")
-
         train_data, gene_names = dael_utils.prep_daeldg(h5ad_path=cfg.paths.h5ad_path, 
-                                                        source_list=total_list, 
+                                                        source_list=cfg.common.source_list + cfg.common.target_list, 
                                                         n_samples=cfg.common.n_samples, 
                                                         n_vtop=cfg.common.n_vtop)
         self.train_data = train_data
         self.gene_names = gene_names
+
+        # Domain ids must match the order used in dael_da.BaseModel.aug_dataloader.
+        all_domains = self.train_data.obs['ds'].unique().tolist()
+        domain_dict = {ds: i for i, ds in enumerate(all_domains)}
+        self.target_indices = [domain_dict[item] for item in cfg.common.target_list]
+        print(f"Target indices: {self.target_indices}")
 
     
     def run_rec(self, noise=0.0):
@@ -79,13 +90,14 @@ class SimpleTrainer():
 
         rec_model = dael_da.AE(option_list, seed=cfg.rec.seed).to(self.device)
         rec_model.aug_dataloader(self.train_data, batch_size=rec_model.batch_size, noise=noise, target_cells=self.target_cells)
-        rec_model.load_state_dict(torch.load(os.path.join(cfg.paths.rec_model_path, f'ae_rec_{noise}.pth')))
+        rec_model.load_state_dict(torch.load(os.path.join(cfg.paths.rec_model_path, f'ae_rec_{noise}.pth'), map_location=self.device))
         rec_model.eval()
 
-        data_x = torch.tensor(rec_model.data_x).to(self.device)
-        data_y = torch.tensor(rec_model.data_y).to(self.device)
-        rec_x, feats = rec_model(data_x)
-        domains = rec_model.domains.to(self.device)
+        with torch.no_grad():
+            data_x = torch.tensor(rec_model.data_x).to(self.device)
+            data_y = torch.tensor(rec_model.data_y).to(self.device)
+            _, feats = rec_model(data_x)
+            domains = rec_model.domains.to(self.device)
 
         return feats, domains, data_y
     
@@ -117,6 +129,9 @@ class SimpleTrainer():
 
         dael_model = dael_da.DAEL(option_list, seed=42).to(self.device)
         optimizer = torch.optim.Adam(dael_model.parameters(), lr=cfg.dael.learning_rate)
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=cfg.dael.epochs)
+        update_flag = 0
+        unlabeled_iter = cycle(self.unlabel_loader)
 
         # WandB logger settings
         logger = WandbLogger(
@@ -133,7 +148,7 @@ class SimpleTrainer():
             loss_x_epoch, loss_cr_epoch, loss_u_epoch = 0, 0, 0
 
             for _, batch_x in enumerate(self.label_loader):
-                batch_u = next(iter(self.unlabel_loader))
+                batch_u = next(unlabeled_iter)
                 feat_x, feat_x2, prop_x, domain_x, feat_u, feat_u2 = dael_utils.parse_batch_train(batch_x, batch_u, self.device)
 
                 # --- Generate pseudo label for unlabeled (target) data ---
@@ -231,6 +246,11 @@ class SimpleTrainer():
                 loss_x_epoch += loss_x.item()
                 loss_cr_epoch += loss_cr.item()
                 loss_u_epoch += loss_u.item() * self.weight_u
+
+            n_batches = max(len(self.label_loader), 1)
+            loss_x_epoch /= n_batches
+            loss_cr_epoch /= n_batches
+            loss_u_epoch /= n_batches
             
             # save best model and early stopping
             target_loss = loss_x_epoch + loss_cr_epoch + loss_u_epoch
@@ -261,10 +281,13 @@ class SimpleTrainer():
             
             if (epoch+1) % 10 == 0:
                 print(f"Epoch {epoch+1}: Loss: {loss_x_epoch + loss_cr_epoch + loss_u_epoch:.4f}, Loss_x: {loss_x_epoch:.4f}, Loss_cr: {loss_cr_epoch:.4f}, Loss_u: {loss_u_epoch:.4f}")
+
+            scheduler.step()
             
 
     def target_inference(self, dael_model, domains=torch.tensor([0,1,2,3]), target_domain=[4,5]):
-        target_idx = torch.isin(domains, torch.tensor(target_domain, device=self.device))
+        target_domain_tensor = torch.tensor(target_domain, device=domains.device)
+        target_idx = torch.isin(domains, target_domain_tensor)
         t_feats = self.feats0[target_idx,:]
         data_y = self.data_y[target_idx,:]
 
@@ -283,8 +306,8 @@ class SimpleTrainer():
         y_df = pd.DataFrame(data_y.cpu().detach().numpy(), columns=self.target_cells)
 
         # Evaluation
-        dec_name_list = [["Monocytes"],["Unknown"],["Bcells"],["CD4Tcells"],["CD8Tcells"],["NK"]]
-        val_name_list = [["Monocytes"],["Unknown"],["Bcells"],["CD4Tcells"],["CD8Tcells"],["NK"]]
+        dec_name_list = [[cell] for cell in self.target_cells]
+        val_name_list = [[cell] for cell in self.target_cells]
 
         res = ev.eval_deconv(dec_name_list=dec_name_list, val_name_list=val_name_list, deconv_df=dec_df, y_df=y_df, do_plot=False)
 
@@ -332,7 +355,7 @@ class SimpleTrainer():
 
         # load best model
         dael_model = dael_da.DAEL(option_list, seed=42).to(self.device)
-        dael_model.load_state_dict(torch.load(os.path.join(cfg.paths.dael_model_path, f'dael_da_best.pth')))
+        dael_model.load_state_dict(torch.load(os.path.join(cfg.paths.dael_model_path, f'dael_da_best.pth'), map_location=self.device))
 
         # inference source
         dael_model.eval()
@@ -355,10 +378,10 @@ class SimpleTrainer():
 
         dec_df = pd.DataFrame(p_k.cpu().detach().numpy(), columns=self.target_cells)
         y_df = pd.DataFrame(self.data_y.cpu().detach().numpy(), columns=self.target_cells)
-        dec_name_list = [["Monocytes"],["Unknown"],["Bcells"],["CD4Tcells"],["CD8Tcells"],["NK"]]
-        val_name_list = [["Monocytes"],["Unknown"],["Bcells"],["CD4Tcells"],["CD8Tcells"],["NK"]]
+        dec_name_list = [[cell] for cell in self.target_cells]
+        val_name_list = [[cell] for cell in self.target_cells]
 
-        for d in range(dael_model.n_domain+1):
+        for d in torch.unique(domains).tolist():
             # select the domain index
             d_idx = (domains.cpu().detach().numpy() == d).nonzero()[0]
             d_dec_df = dec_df.iloc[d_idx, :]
@@ -382,4 +405,4 @@ class SimpleTrainer():
             summary_df.index = [t[0] for t in val_name_list]
             summary_df.loc['mean'] = summary_df.mean()
 
-            display(summary_df)
+            print(summary_df)
