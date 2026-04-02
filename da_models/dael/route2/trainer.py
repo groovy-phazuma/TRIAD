@@ -22,14 +22,15 @@ import torch
 
 import sys
 current_file = Path(__file__).resolve()
-triad_root = current_file.parents[2]
+triad_root = current_file.parents[3]
 project_root = triad_root.parent
 
 if str(triad_root) not in sys.path:
     sys.path.append(str(triad_root))
 
-from da_models.dael import dael_da
-from da_models.dael import dael_utils
+from da_models.dael.route2 import dael_da
+from da_models.dael.route2 import dael_utils
+from da_models.dael.route2.reconstruction import DenoisingVAE, DualLatentVAE
 
 utils_path = project_root / "deconv-utils"
 if str(utils_path) not in sys.path:
@@ -50,6 +51,10 @@ class SimpleTrainer():
         self.target_cells = cfg.common.target_cells
         self.noise_std_list = [0.0, 0.1, 0.5, 1.0]
         self.drop_prob_list = [0.0, 0.1, 0.2, 0.3]
+
+        # Reconstruction backbone switch (backward compatible: default AE)
+        self.rec_model_type = str(getattr(cfg.rec, 'model', 'ae')).lower()
+        self.rec_use_stable_only = bool(getattr(cfg.rec, 'use_stable_only', False))
 
         self.data_preprocessing()
         print("--- Complete Data Preprocessing ---")
@@ -88,18 +93,82 @@ class SimpleTrainer():
             option_list[key] = value
         option_list['feature_num'] = self.train_data.shape[1]
 
-        rec_model = dael_da.AE(option_list, seed=cfg.rec.seed).to(self.device)
+        rec_model = self._build_rec_model(option_list, seed=cfg.rec.seed).to(self.device)
         rec_model.aug_dataloader(self.train_data, batch_size=rec_model.batch_size, noise=noise, target_cells=self.target_cells)
-        rec_model.load_state_dict(torch.load(os.path.join(cfg.paths.rec_model_path, f'ae_rec_{noise}.pth'), map_location=self.device))
+        rec_path = self._resolve_rec_checkpoint(noise)
+        rec_model.load_state_dict(torch.load(rec_path, map_location=self.device))
         rec_model.eval()
 
         with torch.no_grad():
             data_x = torch.tensor(rec_model.data_x).to(self.device)
             data_y = torch.tensor(rec_model.data_y).to(self.device)
-            _, feats = rec_model(data_x)
+            feats = self._extract_feats(rec_model, data_x)
             domains = rec_model.domains.to(self.device)
 
         return feats, domains, data_y
+
+    def _build_rec_model(self, option_list, seed=42):
+        if self.rec_model_type == 'ae':
+            return dael_da.AE(option_list, seed=seed)
+        if self.rec_model_type == 'vae':
+            return DenoisingVAE(option_list, seed=seed)
+        if self.rec_model_type == 'dualvae':
+            return DualLatentVAE(option_list, seed=seed)
+        raise ValueError(f"Unknown reconstruction model: {self.rec_model_type}")
+
+    def _extract_feats(self, rec_model, data_x):
+        if self.rec_model_type == 'ae':
+            _, feats = rec_model(data_x)
+            return feats
+
+        if self.rec_model_type == 'vae':
+            _, feats, _, _ = rec_model(data_x)
+            return feats
+
+        # dualvae: keep both stable/noise-aware latents by default
+        _, z_s, z_n, _, _, _, _, _ = rec_model(data_x)
+        if self.rec_use_stable_only:
+            return z_s
+        return torch.cat((z_s, z_n), dim=1)
+
+    def _resolve_rec_checkpoint(self, noise):
+        cfg = self.cfg
+        rec_dir = cfg.paths.rec_model_path
+
+        prefix_map = {
+            'ae': 'ae_rec',
+            'vae': 'vae_rec',
+            'dualvae': 'dualvae_rec',
+        }
+        prefix = prefix_map.get(self.rec_model_type)
+        if prefix is None:
+            raise ValueError(f"Unknown reconstruction model: {self.rec_model_type}")
+
+        # Preferred naming: <prefix>_<noise>.pth
+        candidates = [
+            os.path.join(rec_dir, f'{prefix}_{noise}.pth'),
+            os.path.join(rec_dir, f'{prefix}_{float(noise):.1f}.pth'),
+            os.path.join(rec_dir, f'{prefix}_{str(noise).rstrip("0").rstrip(".")}.pth'),
+        ]
+
+        # Backward-compatible names for old AE checkpoints.
+        if self.rec_model_type == 'ae':
+            if abs(float(noise) - 0.0) < 1e-8:
+                candidates.append(os.path.join(rec_dir, 'ae_rec_base.pth'))
+            elif abs(float(noise) - 0.1) < 1e-8:
+                candidates.append(os.path.join(rec_dir, 'ae_rec_weak.pth'))
+            elif abs(float(noise) - 1.0) < 1e-8:
+                candidates.append(os.path.join(rec_dir, 'ae_rec_strong.pth'))
+
+        for path in candidates:
+            if os.path.exists(path):
+                print(f"Use reconstruction checkpoint: {path}")
+                return path
+
+        raise FileNotFoundError(
+            f"Reconstruction checkpoint not found for model={self.rec_model_type}, noise={noise}. "
+            f"Checked: {candidates}"
+        )
     
     def build_data_loader(self):
         cfg = self.cfg
