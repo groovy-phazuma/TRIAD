@@ -195,7 +195,7 @@ def parse_list(text: str) -> List[str]:
     return [x.strip() for x in text.split(",") if x.strip()]
 
 
-def train_one_noise(train_data, target_cells, args, noise, device):
+def train_one_noise(train_data, target_cells, args, noise, device, return_history=False):
     option_list = {
         "batch_size": args.batch_size,
         "feature_num": train_data.shape[1],
@@ -228,6 +228,14 @@ def train_one_noise(train_data, target_cells, args, noise, device):
     best_loss = float("inf")
     stale = 0
     save_path = os.path.join(args.save_dir, f"{ckpt_prefix}_{noise}.pth")
+    history = {
+        "epoch": [],
+        "total": [],
+        "reconstruction": [],
+        "kl_stable": [],
+        "kl_noise": [],
+        "noise": [],
+    }
 
     for epoch in range(args.epochs):
         model.train()
@@ -257,6 +265,24 @@ def train_one_noise(train_data, target_cells, args, noise, device):
             n_batch += 1
 
         epoch_loss /= max(n_batch, 1)
+        history["epoch"].append(epoch + 1)
+        history["total"].append(epoch_loss)
+
+        if args.model == "ae":
+            history["reconstruction"].append(epoch_loss)
+            history["kl_stable"].append(0.0)
+            history["kl_noise"].append(0.0)
+            history["noise"].append(0.0)
+        elif args.model == "vae":
+            history["reconstruction"].append(float(rec_loss))
+            history["kl_stable"].append(float(kl))
+            history["kl_noise"].append(0.0)
+            history["noise"].append(0.0)
+        else:
+            history["reconstruction"].append(float(rec_loss))
+            history["kl_stable"].append(float(kl_s))
+            history["kl_noise"].append(float(kl_n))
+            history["noise"].append(float(noise_loss))
 
         if epoch_loss < best_loss:
             best_loss = epoch_loss
@@ -285,6 +311,9 @@ def train_one_noise(train_data, target_cells, args, noise, device):
             break
 
     print(f"[noise={noise}] best_loss={best_loss:.6f} -> {save_path}")
+    if return_history:
+        return save_path, history
+    return save_path
 
 
 def build_parser() -> argparse.ArgumentParser:

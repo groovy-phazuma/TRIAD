@@ -55,6 +55,14 @@ class SimpleTrainer():
         # Reconstruction backbone switch (backward compatible: default AE)
         self.rec_model_type = str(getattr(cfg.rec, 'model', 'ae')).lower()
         self.rec_use_stable_only = bool(getattr(cfg.rec, 'use_stable_only', False))
+        self.rec_feature_cache = bool(getattr(cfg.rec, 'feature_cache', True))
+
+        # Stabilize pseudo-label training while preserving original DAEL behavior.
+        self.weight_u = float(getattr(cfg.dael, 'weight_u', 1.0))
+        self.weight_u_min = float(getattr(cfg.dael, 'weight_u_min', 0.1))
+        self.rampup_u_epochs = max(1, int(getattr(cfg.dael, 'rampup_u_epochs', max(10, cfg.dael.epochs // 5))))
+        self.pseudo_conf_threshold = float(getattr(cfg.dael, 'pseudo_conf_threshold', 0.45))
+        self.pseudo_conf_power = float(getattr(cfg.dael, 'pseudo_conf_power', 2.0))
 
         self.data_preprocessing()
         print("--- Complete Data Preprocessing ---")
@@ -99,11 +107,28 @@ class SimpleTrainer():
         rec_model.load_state_dict(torch.load(rec_path, map_location=self.device))
         rec_model.eval()
 
+        cache_path = os.path.join(cfg.paths.rec_model_path, f'{self.rec_model_type}_noise{noise}_features.pt')
+        if self.rec_feature_cache and os.path.exists(cache_path):
+            cached = torch.load(cache_path, map_location=self.device)
+            print(f"Use cached features: {cache_path}")
+            return cached['feats'], cached['domains'], cached['data_y']
+
         with torch.no_grad():
             data_x = torch.tensor(rec_model.data_x).to(self.device)
             data_y = torch.tensor(rec_model.data_y).to(self.device)
             feats = self._extract_feats(rec_model, data_x)
             domains = rec_model.domains.to(self.device)
+
+        if self.rec_feature_cache:
+            torch.save(
+                {
+                    'feats': feats.detach().cpu(),
+                    'domains': domains.detach().cpu(),
+                    'data_y': data_y.detach().cpu(),
+                },
+                cache_path,
+            )
+            print(f"Saved feature cache: {cache_path}")
 
         return feats, domains, data_y
 
@@ -194,8 +219,6 @@ class SimpleTrainer():
         option_list['n_domain'] = len(cfg.common.source_list)
 
         self.expert_selection = cfg.dael.expert_selection
-        self.weight_u = cfg.dael.weight_u
-
         dael_model = dael_da.DAEL(option_list, seed=42).to(self.device)
         optimizer = torch.optim.Adam(dael_model.parameters(), lr=cfg.dael.learning_rate)
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=cfg.dael.epochs)
@@ -215,6 +238,8 @@ class SimpleTrainer():
         for epoch in range(cfg.dael.epochs):
             dael_model.train()
             loss_x_epoch, loss_cr_epoch, loss_u_epoch = 0, 0, 0
+            u_ramp = min(1.0, float(epoch + 1) / float(self.rampup_u_epochs))
+            u_w = self.weight_u_min + (self.weight_u - self.weight_u_min) * u_ramp
 
             for _, batch_x in enumerate(self.label_loader):
                 batch_u = next(unlabeled_iter)
@@ -300,13 +325,17 @@ class SimpleTrainer():
                 stacked = torch.stack(u_preds, dim=-1)  # (B, n_class, n_domain)
                 pred_u = stacked.mean(dim=-1)
 
-                loss_u = ((pseudo_prop - pred_u) ** 2).mean()
+                # Confidence-weighted pseudo-label loss to reduce noisy unlabeled supervision.
+                conf = pseudo_prop.max(dim=1).values.detach()
+                conf = torch.clamp((conf - self.pseudo_conf_threshold) / (1.0 - self.pseudo_conf_threshold + 1e-8), min=0.0, max=1.0)
+                conf = conf.pow(self.pseudo_conf_power)
+                loss_u = (((pseudo_prop - pred_u) ** 2).mean(dim=1) * conf).mean()
 
                 # --- Backprop ---
                 loss = 0
                 loss += loss_x
                 loss += loss_cr
-                loss += loss_u * self.weight_u
+                loss += loss_u * u_w
 
                 optimizer.zero_grad()
                 loss.backward()
@@ -314,7 +343,7 @@ class SimpleTrainer():
 
                 loss_x_epoch += loss_x.item()
                 loss_cr_epoch += loss_cr.item()
-                loss_u_epoch += loss_u.item() * self.weight_u
+                loss_u_epoch += loss_u.item() * u_w
 
             n_batches = max(len(self.label_loader), 1)
             loss_x_epoch /= n_batches
@@ -349,7 +378,11 @@ class SimpleTrainer():
             )
             
             if (epoch+1) % 10 == 0:
-                print(f"Epoch {epoch+1}: Loss: {loss_x_epoch + loss_cr_epoch + loss_u_epoch:.4f}, Loss_x: {loss_x_epoch:.4f}, Loss_cr: {loss_cr_epoch:.4f}, Loss_u: {loss_u_epoch:.4f}")
+                print(
+                    f"Epoch {epoch+1}: Loss: {loss_x_epoch + loss_cr_epoch + loss_u_epoch:.4f}, "
+                    f"Loss_x: {loss_x_epoch:.4f}, Loss_cr: {loss_cr_epoch:.4f}, Loss_u: {loss_u_epoch:.4f}, "
+                    f"u_w: {u_w:.3f}"
+                )
 
             scheduler.step()
             
@@ -475,3 +508,15 @@ class SimpleTrainer():
             summary_df.loc['mean'] = summary_df.mean()
 
             print(summary_df)
+
+
+def main(cfg):
+    trainer = SimpleTrainer(cfg=cfg)
+    trainer.train_dael()
+
+
+if __name__ == '__main__':
+    raise SystemExit(
+        'This module is intended to be imported with a cfg object. '
+        'Use the project-level runner or call main(cfg) from a config script.'
+    )
